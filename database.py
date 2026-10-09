@@ -36,7 +36,26 @@ CREATE TABLE IF NOT EXISTS guild_settings (
     color        INT NOT NULL DEFAULT 8141549,
     ping_role_id BIGINT
 );
+
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS image_url TEXT;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS min_account_days INT NOT NULL DEFAULT 0;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS min_server_days INT NOT NULL DEFAULT 0;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS manager_role_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS blacklist_role_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS button_label TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS button_emoji TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS footer_text TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS win_message TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS no_winner_message TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS dm_winners BOOLEAN NOT NULL DEFAULT TRUE;
 """
+
+SETTING_TYPES = {
+    "color": "int", "ping_role_id": "bigint", "manager_role_id": "bigint",
+    "blacklist_role_id": "bigint", "button_label": "text", "button_emoji": "text",
+    "footer_text": "text", "win_message": "text", "no_winner_message": "text",
+    "dm_winners": "boolean",
+}
 
 
 class Database:
@@ -61,10 +80,12 @@ class Database:
     async def create(self, **f):
         return await self.pool.fetchrow(
             """INSERT INTO giveaways (guild_id, channel_id, host_id, prize, description,
-                                      winners, ends_at, required_role_id, bonus_role_id, bonus_entries)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *""",
+                                      winners, ends_at, required_role_id, bonus_role_id, bonus_entries,
+                                      image_url, min_account_days, min_server_days)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *""",
             f["guild_id"], f["channel_id"], f["host_id"], f["prize"], f["description"],
-            f["winners"], f["ends_at"], f["required_role_id"], f["bonus_role_id"], f["bonus_entries"])
+            f["winners"], f["ends_at"], f["required_role_id"], f["bonus_role_id"], f["bonus_entries"],
+            f["image_url"], f["min_account_days"], f["min_server_days"])
 
     async def set_message(self, gid, message_id):
         await self.pool.execute("UPDATE giveaways SET message_id=$2 WHERE id=$1", gid, message_id)
@@ -137,12 +158,12 @@ class Database:
     async def get_settings(self, guild_id):
         return await self.pool.fetchrow("SELECT * FROM guild_settings WHERE guild_id=$1", guild_id)
 
-    async def set_settings(self, guild_id, color, ping_role_id, clear_ping):
+    async def set_setting(self, guild_id, field, value):
+        kind = SETTING_TYPES[field]  # only known columns are ever interpolated
         await self.pool.execute(
-            """INSERT INTO guild_settings (guild_id, color, ping_role_id)
-               VALUES ($1, COALESCE($2::int, 8141549), $3::bigint)
-               ON CONFLICT (guild_id) DO UPDATE SET
-                 color = COALESCE($2::int, guild_settings.color),
-                 ping_role_id = CASE WHEN $4::boolean THEN NULL
-                                     ELSE COALESCE($3::bigint, guild_settings.ping_role_id) END""",
-            guild_id, color, ping_role_id, clear_ping)
+            f"""INSERT INTO guild_settings (guild_id, {field}) VALUES ($1, $2::{kind})
+                ON CONFLICT (guild_id) DO UPDATE SET {field} = $2::{kind}""",
+            guild_id, value)
+
+    async def reset_settings(self, guild_id):
+        await self.pool.execute("DELETE FROM guild_settings WHERE guild_id=$1", guild_id)
