@@ -1,88 +1,85 @@
+import logging
 import os
 import threading
 
 import discord
 from discord import app_commands
+from discord.ext import commands
 from flask import Flask
 
-TOKEN = os.environ.get("DISCORD_TOKEN")
-if not TOKEN:
-    raise SystemExit("DISCORD_TOKEN env var is missing. Set it in Render > Environment.")
+from database import Database
 
-# ---------- Keep-alive web server (Render needs an open port) ----------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.getLogger("werkzeug").setLevel(logging.WARNING)
+log = logging.getLogger("giftly")
+
+TOKEN = os.environ.get("DISCORD_TOKEN")
+DATABASE_URL = os.environ.get("DATABASE_URL")
+missing = [n for n, v in (("DISCORD_TOKEN", TOKEN), ("DATABASE_URL", DATABASE_URL)) if not v]
+if missing:
+    raise SystemExit(f"Missing environment variable(s): {', '.join(missing)}. Add them in Render > Environment.")
+
+# Tiny web server so Render (and UptimeRobot) have something to ping.
 web = Flask(__name__)
 
 
 @web.route("/")
-def home():
-    return "Bot is running", 200
+@web.route("/health")
+def health():
+    return "ok", 200
 
 
 def run_web():
     web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
 
-# ---------- Ticket buttons (persistent across restarts) ----------
-class CloseView(discord.ui.View):
+class Giftly(commands.Bot):
     def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Close Ticket", style=discord.ButtonStyle.red, custom_id="ticket:close")
-    async def close(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("Closing ticket...")
-        await interaction.channel.delete()
-
-
-class TicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="Open Ticket", style=discord.ButtonStyle.green, custom_id="ticket:open")
-    async def open(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
-        }
-        channel = await guild.create_text_channel(f"ticket-{interaction.user.name}", overwrites=overwrites)
-        await channel.send(f"{interaction.user.mention} staff will be with you shortly.", view=CloseView())
-        await interaction.response.send_message(f"Ticket created: {channel.mention}", ephemeral=True)
-
-
-# ---------- Bot ----------
-class Bot(discord.Client):
-    def __init__(self):
-        super().__init__(intents=discord.Intents.default())
-        self.tree = app_commands.CommandTree(self)
+        super().__init__(
+            command_prefix=commands.when_mentioned,
+            intents=discord.Intents.default(),  # no privileged intents needed
+            help_command=None,
+        )
+        self.db = Database(DATABASE_URL)
 
     async def setup_hook(self):
-        self.add_view(TicketView())
-        self.add_view(CloseView())
+        try:
+            await self.db.connect()
+        except Exception:
+            log.exception("Could not connect to the database. Check DATABASE_URL.")
+            raise
+        await self.load_extension("giveaways")
+        self.tree.on_error = self.on_tree_error
         await self.tree.sync()
 
+    async def on_ready(self):
+        log.info("Logged in as %s (%s servers)", self.user, len(self.guilds))
+        await self.change_presence(
+            activity=discord.Activity(type=discord.ActivityType.watching, name="giveaways"))
 
-bot = Bot()
+    async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
+        if isinstance(error, app_commands.MissingPermissions):
+            text = "You need the Manage Server permission to use that."
+        else:
+            log.error("Command error", exc_info=error)
+            text = "Something went wrong on my end. Please try again in a moment."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
 
 
-@bot.tree.command(name="ping", description="Check if the bot is alive")
+bot = Giftly()
+
+
+@bot.tree.command(name="ping", description="Check that Giftly is online")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"Pong! {round(bot.latency * 1000)}ms")
-
-
-@bot.tree.command(name="panel", description="Post the ticket panel")
-@app_commands.default_permissions(administrator=True)
-async def panel(interaction: discord.Interaction):
-    embed = discord.Embed(title="Support", description="Click below to open a ticket.", color=0x5865F2)
-    await interaction.channel.send(embed=embed, view=TicketView())
-    await interaction.response.send_message("Panel posted.", ephemeral=True)
-
-
-@bot.event
-async def on_ready():
-    print(f"Logged in as {bot.user}")
+    await interaction.response.send_message(f"Pong. {round(bot.latency * 1000)}ms", ephemeral=True)
 
 
 if __name__ == "__main__":
     threading.Thread(target=run_web, daemon=True).start()
-    bot.run(TOKEN)
+    bot.run(TOKEN, log_handler=None)
