@@ -3,117 +3,111 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#7c3aed">
 <title>Giftly: giveaways for Discord</title>
-<meta name="description" content="Run fair, good-looking giveaways in your Discord server. Required roles, bonus entries, rerolls and per-server settings.">
+<meta name="description" content="Giftly runs giveaways in your Discord server and picks the winners for you.">
 <link rel="icon" href="/logo.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=DM+Sans:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&family=Nunito:wght@400;600;800&display=swap">
 <style>
-:root{--ink:#170f2e;--ink2:#221544;--line:#3a2a66;--text:#f3eeff;--mute:#b9aedb;--violet:#7c3aed;--pink:#ec4899;--butter:#fde047;
---head:"Bricolage Grotesque","Trebuchet MS",system-ui,sans-serif;--body:"DM Sans",system-ui,-apple-system,"Segoe UI",sans-serif}
+:root{--violet:#7c3aed;--pink:#ec4899;--butter:#fde047;--amber:#f59e0b;--cyan:#67e8f9;--lav:#e9d5ff;--paper:#faf6ff;--ink:#2a1654;
+--head:"Fredoka","Trebuchet MS",system-ui,sans-serif;--body:"Nunito",system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box}
-html{scroll-behavior:smooth}
-body{margin:0;background:var(--ink);color:var(--text);font:400 17px/1.6 var(--body)}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 18px/1.65 var(--body)}
 a{color:inherit}
-.wrap{max-width:1040px;margin:0 auto;padding:0 22px}
-nav{display:flex;align-items:center;justify-content:space-between;padding:18px 0}
-nav .brand{display:flex;align-items:center;gap:10px;font:800 21px var(--head);text-decoration:none}
-nav img{width:36px;height:36px;border-radius:10px}
-nav a.link{color:var(--mute);text-decoration:none;font-weight:500}
-.hero{display:grid;grid-template-columns:1.1fr .9fr;gap:48px;align-items:center;padding:56px 0 72px}
-h1{font:800 clamp(38px,6vw,64px)/1.04 var(--head);margin:0 0 18px;letter-spacing:-.02em}
-.lede{color:var(--mute);font-size:19px;max-width:30em;margin:0 0 28px}
-.btn{display:inline-block;background:var(--butter);color:#2a1d00;font:700 17px var(--body);padding:15px 26px;border-radius:12px;text-decoration:none}
-.btn:hover{background:#fff27a}
-.btn:focus-visible,a:focus-visible{outline:3px solid var(--pink);outline-offset:3px}
-.sub{color:var(--mute);font-size:14px;margin-top:14px}
-.embed{background:#313338;border-radius:10px;border-left:4px solid var(--violet);padding:16px 18px;max-width:420px;margin-left:auto;box-shadow:0 20px 50px rgba(0,0,0,.45);font-family:var(--body)}
-.embed small{display:block;color:#b5bac1;font-size:13px;margin-bottom:4px}
-.embed h3{margin:0 0 8px;font:700 19px var(--body);color:#fff}
-.embed p{margin:0 0 12px;color:#dbdee1;font-size:15px;line-height:1.5}
-.embed .row{display:flex;gap:26px;margin-bottom:14px;color:#dbdee1;font-size:14px}
-.embed .row b{display:block;color:#fff;font-size:13px}
-.embed .enter{display:inline-block;background:#5865f2;color:#fff;font-weight:600;font-size:14px;padding:8px 20px;border-radius:6px}
-section{padding:54px 0;border-top:1px solid var(--line)}
-h2{font:800 clamp(28px,4vw,38px)/1.1 var(--head);margin:0 0 28px;letter-spacing:-.01em}
-.feat{display:grid;grid-template-columns:1fr 1fr;gap:26px 48px}
-.feat h3{margin:0 0 4px;font:700 18px var(--body)}
-.feat p{margin:0;color:var(--mute)}
-.cmds{display:grid;grid-template-columns:auto 1fr;gap:12px 22px;max-width:760px}
-code{font:500 15px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--ink2);padding:3px 9px;border-radius:7px;color:var(--butter);white-space:nowrap}
-.cmds span{color:var(--mute)}
-ol{max-width:640px;padding-left:22px;margin:0}
-li{margin-bottom:12px}
-li::marker{color:var(--pink);font-weight:700}
-.cta{text-align:left}
-footer{border-top:1px solid var(--line);padding:26px 0 40px;color:var(--mute);font-size:14px}
-@media(max-width:780px){.hero{grid-template-columns:1fr;padding-top:28px}.embed{margin:0}.feat{grid-template-columns:1fr}.cmds{grid-template-columns:1fr;gap:4px}.cmds span{margin-bottom:12px}}
-@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}}
+.wrap{max-width:1000px;margin:0 auto;padding:0 24px}
+.top{background:linear-gradient(120deg,#7c3aed 0%,#a23fd0 48%,#ec4899 100%);color:#fff;border-radius:0 0 44px 44px;overflow:hidden}
+nav{display:flex;align-items:center;gap:12px;padding:22px 0;font:600 24px var(--head)}
+nav img{width:40px;height:40px;border-radius:11px}
+.hero{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:20px;padding:24px 0 64px}
+h1{font:600 clamp(36px,5.6vw,58px)/1.08 var(--head);margin:0 0 18px}
+.hero p{font-size:20px;max-width:26em;margin:0 0 30px}
+.btn{display:inline-block;background:var(--butter);color:var(--ink);font:800 18px var(--body);padding:15px 28px;border-radius:16px;text-decoration:none;box-shadow:0 5px 0 var(--amber)}
+.btn:hover{transform:translateY(2px);box-shadow:0 3px 0 var(--amber)}
+.btn:focus-visible,a:focus-visible{outline:3px solid #fff;outline-offset:4px}
+.hero svg{width:100%;max-width:430px;justify-self:center;display:block}
+main{padding:64px 0 24px}
+.cols{display:grid;grid-template-columns:1.1fr .9fr;gap:52px;align-items:start}
+h2{font:600 32px/1.15 var(--head);margin:0 0 18px}
+main p{margin:0 0 16px;max-width:34em}
+.embed{background:#313338;border-radius:10px;border-left:4px solid var(--violet);padding:16px 18px;box-shadow:0 14px 34px rgba(42,22,84,.25);color:#dbdee1;font-size:15px;line-height:1.5}
+.embed small{display:block;color:#b5bac1;font-size:13px}
+.embed h3{margin:2px 0 8px;font:700 19px var(--body);color:#fff}
+.embed .row{display:flex;gap:26px;margin:12px 0 14px}
+.embed b{display:block;color:#fff;font-size:13px}
+.embed .enter{display:inline-block;background:#5865f2;color:#fff;font-weight:700;font-size:14px;padding:8px 20px;border-radius:6px}
+.cmds{margin:44px 0 0;padding:28px 30px;background:var(--lav);border-radius:24px}
+.cmds h2{font-size:26px;margin-bottom:14px}
+.cmds dl{display:grid;grid-template-columns:max-content 1fr;gap:8px 20px;margin:0}
+.cmds dt{font:700 15px ui-monospace,SFMono-Regular,Menlo,monospace}
+.cmds dd{margin:0}
+.end{padding:56px 0 20px}
+footer{padding:24px 0 44px;font-size:14px;opacity:.7}
+@media(max-width:760px){.hero,.cols{grid-template-columns:1fr}.hero svg{max-width:300px;margin-top:6px}.cols{gap:30px}.cmds dl{grid-template-columns:1fr;gap:0}.cmds dd{margin-bottom:10px}}
 </style>
 </head>
 <body>
-<div class="wrap">
-<nav>
-  <a class="brand" href="/"><img src="/logo.png" alt="">Giftly</a>
-  <a class="link" href="#commands">Commands</a>
-</nav>
-
-<header class="hero">
-  <div>
-    <h1>Giveaways your server will actually enjoy.</h1>
-    <p class="lede">Giftly runs fair giveaways with required roles, bonus entries and rerolls, and every setting is a few taps away.</p>
-    <a class="btn" href="{{INVITE_URL}}">Add to Discord</a>
-    <p class="sub">Free. Asks only for the permissions it needs to post giveaways.</p>
+<div class="top"><div class="wrap">
+  <nav><img src="/logo.png" alt="">Giftly</nav>
+  <div class="hero">
+    <div>
+      <h1>Run giveaways in your Discord server.</h1>
+      <p>Giftly posts the giveaway, counts the entries, and picks the winners when time is up.</p>
+      <a class="btn" href="{{INVITE_URL}}">Add to Discord</a>
+    </div>
+    <svg viewBox="30 30 452 400" role="img" aria-label="A gift box with a yellow bow and confetti">
+      <rect x="86" y="96" width="22" height="10" rx="3" fill="#FDE047" transform="rotate(25 97 101)"/>
+      <rect x="400" y="84" width="22" height="10" rx="3" fill="#67E8F9" transform="rotate(-30 411 89)"/>
+      <circle cx="140" cy="170" r="9" fill="#FDE047"/><circle cx="372" cy="160" r="9" fill="#fff"/>
+      <rect x="62" y="230" width="20" height="9" rx="3" fill="#fff" transform="rotate(-20 72 234)"/>
+      <rect x="430" y="230" width="20" height="9" rx="3" fill="#FDE047" transform="rotate(35 440 234)"/>
+      <circle cx="448" cy="330" r="8" fill="#67E8F9"/><circle cx="66" cy="338" r="8" fill="#FDE047"/>
+      <path d="M256 52l9 22 22 9-22 9-9 22-9-22-22-9 22-9z" fill="#fff"/>
+      <rect x="136" y="236" width="240" height="168" rx="18" fill="#F1E6FF"/>
+      <rect x="118" y="198" width="276" height="56" rx="16" fill="#fff"/>
+      <rect x="226" y="198" width="60" height="206" fill="#FDE047"/>
+      <path d="M256 198C200 130 140 150 170 192c16 18 60 12 86 6z" fill="#FDE047"/>
+      <path d="M256 198c56-68 116-48 86-6-16 18-60 12-86 6z" fill="#FDE047"/>
+      <circle cx="256" cy="198" r="20" fill="#F59E0B"/>
+    </svg>
   </div>
-  <div class="embed" aria-label="Example giveaway">
-    <small>Giveaway</small>
-    <h3>Discord Nitro, 3 months</h3>
-    <p>Ends in 2 hours. Boosters get 2 bonus entries.</p>
-    <div class="row"><div><b>Hosted by</b>@Mia</div><div><b>Winners</b>2</div><div><b>Entries</b>148</div></div>
-    <span class="enter">🎉 Enter</span>
-  </div>
-</header>
+</div></div>
 
-<section>
-  <h2>What you get</h2>
-  <div class="feat">
-    <div><h3>Fair draws</h3><p>Winners are picked at random. Bonus roles raise your odds in proportion to their entries, nothing more.</p></div>
-    <div><h3>Checked at the end</h3><p>If a winner left the server or lost the required role, Giftly skips them and draws again.</p></div>
-    <div><h3>Entry rules</h3><p>Require a role, block a role, or set a minimum account age or time in the server.</p></div>
-    <div><h3>Reroll without drama</h3><p>Swap out a winner who never replied, or add more winners to a finished giveaway.</p></div>
-    <div><h3>Your server, your look</h3><p>Pick the color, button, footer and winner messages from a settings panel inside Discord.</p></div>
-    <div><h3>Keeps running</h3><p>Giveaways survive restarts and end on time, even if nobody is around.</p></div>
+<main class="wrap">
+  <div class="cols">
+    <div>
+      <h2>How a giveaway goes</h2>
+      <p>You type <b>/giveaway start</b>, pick a prize and how long it runs, and Giftly posts it in the channel you choose. Members press the Enter button to join.</p>
+      <p>You decide who can join. Require a role, block a role, ask for a minimum account age, or give a role extra entries.</p>
+      <p>When time is up, Giftly picks winners at random and checks they're still in the server and still allowed to win. If someone never replies, <b>/giveaway reroll</b> draws a replacement.</p>
+    </div>
+    <div class="embed" aria-label="Example giveaway">
+      <small>Giveaway</small>
+      <h3>Discord Nitro, 3 months</h3>
+      Ends in 2 hours. Boosters get 2 bonus entries.
+      <div class="row"><div><b>Hosted by</b>@Mia</div><div><b>Winners</b>2</div><div><b>Entries</b>148</div></div>
+      <span class="enter">🎉 Enter</span>
+    </div>
   </div>
-</section>
 
-<section id="commands">
-  <h2>Commands</h2>
   <div class="cmds">
-    <code>/giveaway start</code><span>Create a giveaway with a prize, duration, winners and entry rules.</span>
-    <code>/giveaway end</code><span>Finish one early and draw the winners.</span>
-    <code>/giveaway reroll</code><span>Draw again, or replace a specific winner.</span>
-    <code>/giveaway edit</code><span>Change the prize, winner count or end time.</span>
-    <code>/giveaway cancel</code><span>Stop a giveaway without a draw.</span>
-    <code>/giveaway list</code><span>See what's running in your server.</span>
-    <code>/giveaway settings</code><span>Open the settings panel.</span>
+    <h2>Make it yours</h2>
+    <p>Open <b>/giveaway settings</b> in your server to change the color, the button, the winner message, which role gets pinged, and who is allowed to run giveaways.</p>
+    <dl>
+      <dt>/giveaway start</dt><dd>Create a giveaway.</dd>
+      <dt>/giveaway end</dt><dd>Finish one early and draw.</dd>
+      <dt>/giveaway reroll</dt><dd>Draw again or replace a winner.</dd>
+      <dt>/giveaway edit</dt><dd>Change the prize, winners or end time.</dd>
+      <dt>/giveaway cancel</dt><dd>Stop one without a draw.</dd>
+      <dt>/giveaway list</dt><dd>See what's running.</dd>
+    </dl>
   </div>
-</section>
 
-<section>
-  <h2>Set up in a minute</h2>
-  <ol>
-    <li>Tap <b>Add to Discord</b> and choose your server.</li>
-    <li>Run <code>/giveaway settings</code> to set your color and roles.</li>
-    <li>Run <code>/giveaway start</code> and fill in the prize and duration.</li>
-  </ol>
-</section>
-
-<section class="cta">
-  <h2>Ready for your first giveaway?</h2>
-  <a class="btn" href="{{INVITE_URL}}">Add to Discord</a>
-</section>
-
-<footer>Giftly is not affiliated with Discord Inc.</footer>
-</div>
+  <div class="end">
+    <h2>Try it in your server</h2>
+    <a class="btn" href="{{INVITE_URL}}">Add to Discord</a>
+  </div>
+</main>
+<div class="wrap"><footer>Giftly is not affiliated with Discord Inc.</footer></div>
 </body>
 </html>
