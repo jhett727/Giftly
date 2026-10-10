@@ -48,13 +48,31 @@ ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS footer_text TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS win_message TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS no_winner_message TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS dm_winners BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS bypass_role_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS default_channel_id BIGINT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS default_duration TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS default_winners INT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS show_entries BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS stack_bonuses BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS author_text TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS dm_message TEXT;
+
+CREATE TABLE IF NOT EXISTS guild_bonus_roles (
+    guild_id BIGINT NOT NULL,
+    role_id  BIGINT NOT NULL,
+    entries  INT NOT NULL,
+    PRIMARY KEY (guild_id, role_id)
+);
 """
 
 SETTING_TYPES = {
     "color": "int", "ping_role_id": "bigint", "manager_role_id": "bigint",
     "blacklist_role_id": "bigint", "button_label": "text", "button_emoji": "text",
     "footer_text": "text", "win_message": "text", "no_winner_message": "text",
-    "dm_winners": "boolean",
+    "dm_winners": "boolean", "bypass_role_id": "bigint", "default_channel_id": "bigint",
+    "default_duration": "text", "default_winners": "int", "show_entries": "boolean",
+    "stack_bonuses": "boolean", "author_text": "text", "thumbnail_url": "text", "dm_message": "text",
 }
 
 
@@ -167,3 +185,19 @@ class Database:
 
     async def reset_settings(self, guild_id):
         await self.pool.execute("DELETE FROM guild_settings WHERE guild_id=$1", guild_id)
+        await self.pool.execute("DELETE FROM guild_bonus_roles WHERE guild_id=$1", guild_id)
+
+    async def bonus_list(self, guild_id):
+        rows = await self.pool.fetch(
+            "SELECT role_id, entries FROM guild_bonus_roles WHERE guild_id=$1", guild_id)
+        return {r["role_id"]: r["entries"] for r in rows}
+
+    async def bonus_set(self, guild_id, role_id, entries):
+        await self.pool.execute(
+            """INSERT INTO guild_bonus_roles (guild_id, role_id, entries) VALUES ($1,$2,$3)
+               ON CONFLICT (guild_id, role_id) DO UPDATE SET entries=$3""", guild_id, role_id, entries)
+
+    async def bonus_remove(self, guild_id, role_id):
+        result = await self.pool.execute(
+            "DELETE FROM guild_bonus_roles WHERE guild_id=$1 AND role_id=$2", guild_id, role_id)
+        return result.endswith(" 1")
