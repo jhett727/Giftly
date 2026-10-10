@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
-from utils import parse_duration, weighted_order
+from utils import parse_duration, public_url, weighted_order
 
 log = logging.getLogger("giftly.giveaways")
 
@@ -32,7 +32,7 @@ DEFAULTS = {
     "author_text": "Giveaway", "thumbnail_url": None, "show_entries": True,
     "win_message": DEFAULT_WIN, "no_winner_message": DEFAULT_NONE, "dm_message": DEFAULT_DM,
     "dm_winners": True, "default_channel_id": None, "default_duration": None, "default_winners": 1,
-    "stack_bonuses": True, "claim_minutes": 0,
+    "stack_bonuses": True, "claim_minutes": 0, "show_branding": True,
 }
 CUSTOM_EMOJI = re.compile(r"^<a?:\w+:\d+>$")
 
@@ -328,6 +328,8 @@ class SettingsView(discord.ui.View):
             self.add_item(ActionButton("Label and image", self.open(EmbedModal), primary))
             self.add_item(ActionButton(f"Entry count: {'shown' if cfg['show_entries'] else 'hidden'}",
                                        self.toggler("show_entries")))
+            self.add_item(ActionButton(f"Powered-by line: {'shown' if cfg['show_branding'] else 'hidden'}",
+                                       self.toggler("show_branding")))
         elif page == "messages":
             self.add_item(ActionButton("Edit messages", self.open(MessagesModal), primary))
             self.add_item(ActionButton(f"Winner DMs: {'on' if cfg['dm_winners'] else 'off'}",
@@ -468,6 +470,7 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 ("Label", cfg["author_text"]),
                 ("Thumbnail", "Set" if cfg["thumbnail_url"] else "None"),
                 ("Entry count", "Shown" if cfg["show_entries"] else "Hidden"),
+                ("Powered-by line", "Shown" if cfg["show_branding"] else "Hidden"),
                 ("Default channel", f"<#{cfg['default_channel_id']}>" if cfg["default_channel_id"] else "Where you run it"),
                 ("Default time", cfg["default_duration"] or "Not set"),
                 ("Default winners", str(cfg["default_winners"])),
@@ -539,7 +542,9 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         shade = {"active": cfg["color"], "ended": ENDED_COLOR, "cancelled": CANCELLED_COLOR}[state]
         embed = discord.Embed(title=g["prize"], description="\n\n".join(parts), color=shade)
         label = cfg["author_text"]
-        embed.set_author(name={"active": label, "ended": f"{label} ended", "cancelled": f"{label} cancelled"}[state])
+        site = public_url()
+        embed.set_author(name={"active": label, "ended": f"{label} ended", "cancelled": f"{label} cancelled"}[state],
+                         url=f"{site}/invite" if site else None)
         embed.add_field(name="Hosted by", value=f"<@{g['host_id']}>")
         if state == "ended":
             winners = ", ".join(f"<@{u}>" for u in g["winner_ids"]) or "No valid entries"
@@ -568,10 +573,12 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             embed.set_image(url=g["image_url"])
         if cfg["thumbnail_url"]:
             embed.set_thumbnail(url=cfg["thumbnail_url"])
-        footer = f"Giveaway #{g['id']}"
+        footer = [f"Giveaway #{g['id']}"]
         if cfg["footer_text"]:
-            footer += f" · {cfg['footer_text']}"
-        embed.set_footer(text=footer[:2048])
+            footer.append(cfg["footer_text"])
+        if cfg["show_branding"]:
+            footer.append("Powered by Dormexed Productions")
+        embed.set_footer(text=" · ".join(footer)[:2048])
         embed.timestamp = ends
         return embed
 
