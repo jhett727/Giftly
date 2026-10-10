@@ -45,6 +45,12 @@ def home():
     return html.replace("{{INVITE_URL}}", invite_url() or "#")
 
 
+@web.route("/terms")
+def terms():
+    page = HERE / "terms.html"
+    return page.read_text(encoding="utf-8") if page.exists() else ("Terms not found.", 404)
+
+
 @web.route("/invite")
 def invite():
     url = invite_url()
