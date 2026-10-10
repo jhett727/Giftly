@@ -32,7 +32,7 @@ DEFAULTS = {
     "author_text": "Giveaway", "thumbnail_url": None, "show_entries": True,
     "win_message": DEFAULT_WIN, "no_winner_message": DEFAULT_NONE, "dm_message": DEFAULT_DM,
     "dm_winners": True, "default_channel_id": None, "default_duration": None, "default_winners": 1,
-    "stack_bonuses": True,
+    "stack_bonuses": True, "claim_minutes": 0,
 }
 CUSTOM_EMOJI = re.compile(r"^<a?:\w+:\d+>$")
 
@@ -109,6 +109,17 @@ class LeaveView(discord.ui.View):
             self.cog.schedule_refresh(self.gid)
         await interaction.edit_original_response(
             content="You've left the giveaway." if removed else "You weren't entered.", view=None)
+
+
+class ClaimView(discord.ui.View):
+    def __init__(self, cog):
+        super().__init__(timeout=None)
+        self.cog = cog
+
+    @discord.ui.button(label="Claim prize", emoji="\U0001F381", style=discord.ButtonStyle.success,
+                       custom_id="giftly:claim")
+    async def claim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog.handle_claim(interaction)
 
 
 # ====================================================================== settings panel
@@ -267,8 +278,12 @@ class DefaultsModal(discord.ui.Modal, title="Default time and winners"):
         self.winners = discord.ui.TextInput(
             label="Default number of winners", placeholder="1", required=False, max_length=2,
             default=str(cfg["default_winners"]))
+        self.claim = discord.ui.TextInput(
+            label="Claim time in minutes (0 = off)", placeholder="0", required=False, max_length=4,
+            default=str(cfg["claim_minutes"]))
         self.add_item(self.duration)
         self.add_item(self.winners)
+        self.add_item(self.claim)
 
     async def on_submit(self, interaction: discord.Interaction):
         duration = str(self.duration).strip()
@@ -284,7 +299,12 @@ class DefaultsModal(discord.ui.Modal, title="Default time and winners"):
                 return await interaction.response.send_message(
                     "Winners needs to be a number from 1 to 20.", ephemeral=True)
             winners = int(raw)
+        claim_raw = str(self.claim).strip() or "0"
+        if not claim_raw.isdigit() or int(claim_raw) > 1440:
+            return await interaction.response.send_message(
+                "Claim time must be a number of minutes from 0 to 1440.", ephemeral=True)
         await interaction.response.defer()
+        await self.cog.save_setting(interaction.guild_id, "claim_minutes", int(claim_raw))
         await self.cog.save_setting(interaction.guild_id, "default_duration", duration or None)
         await self.cog.save_setting(interaction.guild_id, "default_winners", winners)
         await self.cog.refresh_panel(interaction, self.page)
@@ -351,12 +371,16 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         self._refresh = {}
         self._tasks = set()
         self._cfg = {}       # guild id -> (expiry, settings)
+        self.claims = {}     # giveaway id -> claim deadline
 
     # ---------------------------------------------------------------- lifecycle
     async def cog_load(self):
         self.bot.add_view(EntryView(self))
+        self.bot.add_view(ClaimView(self))
         for row in await self.db.active_schedule():
             self.schedule[row["id"]] = row["ends_at"]
+        for row in await self.db.active_claims():
+            self.claims[row["id"]] = row["claim_deadline"]
         self.watcher.start()
 
     async def cog_unload(self):
@@ -388,10 +412,20 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         for gid, ends_at in list(self.schedule.items()):
             if ends_at <= now and gid not in self._ending:
                 self.spawn(self._end_safely(gid))
+        for gid, deadline in list(self.claims.items()):
+            if deadline <= now and gid not in self._ending:
+                self.spawn(self._expire_safely(gid))
 
     @watcher.before_loop
     async def _before_watcher(self):
         await self.bot.wait_until_ready()
+
+    async def _expire_safely(self, gid):
+        try:
+            await self.expire_claim(gid)
+        except Exception:
+            log.exception("Failed to process claim window for giveaway %s, retrying in a minute", gid)
+            self.claims[gid] = utcnow() + dt.timedelta(seconds=60)
 
     async def _end_safely(self, gid):
         try:
@@ -437,6 +471,7 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 ("Default channel", f"<#{cfg['default_channel_id']}>" if cfg["default_channel_id"] else "Where you run it"),
                 ("Default time", cfg["default_duration"] or "Not set"),
                 ("Default winners", str(cfg["default_winners"])),
+                ("Claim window", f"{cfg['claim_minutes']} min" if cfg["claim_minutes"] else "Off"),
                 ("Winner DMs", "On" if cfg["dm_winners"] else "Off"),
                 ("Stack bonuses", "On" if cfg["stack_bonuses"] else "Off")):
             embed.add_field(name=name, value=value)
@@ -580,21 +615,23 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         except discord.HTTPException:
             log.warning("Could not edit message for giveaway %s", g["id"])
 
-    async def announce(self, g, text):
+    async def announce(self, g, text, view=None):
         channel = await self.get_channel(g["channel_id"])
         if channel is None:
-            return
+            return None
+        options = {"allowed_mentions": WINNER_MENTIONS}
+        if view is not None:
+            options["view"] = view
         msg = self.partial(channel, g)
         try:
             if msg is not None:
-                await msg.reply(text, allowed_mentions=WINNER_MENTIONS)
-            else:
-                await channel.send(text, allowed_mentions=WINNER_MENTIONS)
+                return await msg.reply(text, **options)
+            return await channel.send(text, **options)
         except discord.HTTPException:
             try:
-                await channel.send(text, allowed_mentions=WINNER_MENTIONS)
+                return await channel.send(text, **options)
             except discord.HTTPException:
-                pass
+                return None
 
     async def dm_winner(self, uid, g, guild_name):
         try:
@@ -654,7 +691,7 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             values = dict(prize=g["prize"], host=f"<@{g['host_id']}>", link=jump(g), server=server)
             if winners:
                 names = ", ".join(f"<@{u}>" for u in winners)
-                await self.announce(g, fill(cfg["win_message"], winners=names, **values))
+                await self.open_claim(g, fill(cfg["win_message"], winners=names, **values), cfg)
                 if cfg["dm_winners"] and guild:
                     for uid in winners:
                         await self.dm_winner(uid, g, guild.name)
@@ -700,6 +737,90 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             await interaction.followup.send(
                 "You're already entered. Want to leave?",
                 view=LeaveView(self, g["id"], member.id), ephemeral=True)
+
+    # ---------------------------------------------------------------- claiming
+    @staticmethod
+    def drawn(g):
+        return set(g["winner_ids"]) | set(g["excluded_ids"])
+
+    async def open_claim(self, g, text, cfg):
+        """Announce winners. With a claim window set, attach the button and start the clock."""
+        minutes = cfg["claim_minutes"]
+        if not minutes:
+            return await self.announce(g, text)
+        deadline = utcnow() + dt.timedelta(minutes=minutes)
+        text += f"\nPress **Claim prize** before {ts(deadline, 't')} or a new winner will be drawn."
+        msg = await self.announce(g, text, view=ClaimView(self))
+        if msg is not None:
+            await self.db.start_claim(g["id"], deadline, msg.id)
+            self.claims[g["id"]] = deadline
+        return msg
+
+    async def handle_claim(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        g = await self.db.get_by_claim_message(interaction.message.id)
+        if g is None or g["claim_deadline"] is None or g["claim_deadline"] <= utcnow():
+            return await interaction.followup.send("The claim window for this giveaway has closed.", ephemeral=True)
+        uid = interaction.user.id
+        if uid not in g["winner_ids"]:
+            return await interaction.followup.send("Only the winners can claim this prize.", ephemeral=True)
+        g = await self.db.add_claim(g["id"], uid)
+        if g is None:
+            return await interaction.followup.send("You've already claimed this one.", ephemeral=True)
+        await interaction.followup.send("Claimed! The host will be in touch.", ephemeral=True)
+        if all(u in g["claimed_ids"] for u in g["winner_ids"]):
+            await self.db.clear_claim(g["id"])
+            self.claims.pop(g["id"], None)
+            try:
+                await interaction.message.edit(view=closed_view("All claimed"))
+            except discord.HTTPException:
+                pass
+
+    async def expire_claim(self, gid):
+        """The claim window ran out: redraw for anyone who didn't claim."""
+        if gid in self._ending:
+            return
+        self._ending.add(gid)
+        try:
+            self.claims.pop(gid, None)
+            g = await self.db.get(gid)
+            if g is None or g["claim_deadline"] is None:
+                return
+            channel = await self.get_channel(g["channel_id"])
+            if channel is not None and g["claim_message_id"]:
+                try:
+                    await channel.get_partial_message(g["claim_message_id"]).edit(view=closed_view("Expired"))
+                except discord.HTTPException:
+                    pass
+            guild = self.bot.get_guild(g["guild_id"])
+            missing = [u for u in g["winner_ids"] if u not in g["claimed_ids"]]
+            if not missing or guild is None:
+                await self.db.clear_claim(gid)
+                return
+
+            entries = await self.db.entries(gid)
+            await self.db.add_excluded(gid, missing)
+            g = await self.db.get(gid)
+            replacements = await self.pick_winners(guild, g, entries, len(missing), self.drawn(g))
+            kept = [u for u in g["winner_ids"] if u in g["claimed_ids"]]
+            await self.db.set_winners(gid, kept + replacements)
+            g = await self.db.clear_claim(gid)
+            await self.render_final(g)
+
+            lost = ", ".join(f"<@{u}>" for u in missing)
+            if replacements:
+                names = ", ".join(f"<@{u}>" for u in replacements)
+                cfg = await self.settings(g["guild_id"])
+                await self.open_claim(
+                    g, f"{lost} didn't claim in time. New {'winner' if len(replacements) == 1 else 'winners'} "
+                       f"for **{g['prize']}**: {names}. Congratulations!", cfg)
+                if cfg["dm_winners"]:
+                    for uid in replacements:
+                        await self.dm_winner(uid, g, guild.name)
+            else:
+                await self.announce(g, f"{lost} didn't claim **{g['prize']}** in time, and there's nobody left to draw from.")
+        finally:
+            self._ending.discard(gid)
 
     # ---------------------------------------------------------------- autocomplete
     async def _choices(self, interaction, current, mode):
@@ -831,15 +952,19 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         await interaction.response.defer(ephemeral=True)
 
         entries = await self.db.entries(giveaway)
-        picked = await self.pick_winners(guild, g, entries, 1 if replace else count, set(g["winner_ids"]))
+        picked = await self.pick_winners(guild, g, entries, 1 if replace else count, self.drawn(g))
         if not picked:
             return await interaction.followup.send("There are no other eligible entries left to draw from.", ephemeral=True)
 
         kept = [u for u in g["winner_ids"] if not replace or u != replace.id]
         g = await self.db.set_winners(giveaway, kept + picked)
+        if replace:
+            g = await self.db.add_excluded(giveaway, [replace.id])
         await self.render_final(g)
         names = ", ".join(f"<@{u}>" for u in picked)
-        await self.announce(g, f"New {'winner' if len(picked) == 1 else 'winners'} for **{g['prize']}**: {names}. Congratulations!")
+        await self.open_claim(
+            g, f"New {'winner' if len(picked) == 1 else 'winners'} for **{g['prize']}**: {names}. Congratulations!",
+            await self.settings(g["guild_id"]))
         if (await self.settings(g["guild_id"]))["dm_winners"]:
             for uid in picked:
                 await self.dm_winner(uid, g, guild.name)
