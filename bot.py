@@ -11,6 +11,7 @@ from discord.ext import commands, tasks
 from flask import Flask, redirect, send_file
 
 from database import Database
+from updates import announce_update
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("werkzeug").setLevel(logging.WARNING)
@@ -81,6 +82,8 @@ class Giftly(commands.Bot):
             help_command=None,
         )
         self.db = Database(DATABASE_URL)
+        self._update_checked = False
+        self._background = set()
 
     async def setup_hook(self):
         try:
@@ -115,6 +118,11 @@ class Giftly(commands.Bot):
         log.info("Logged in as %s (%s servers)", self.user, len(self.guilds))
         await self.change_presence(
             activity=discord.Activity(type=discord.ActivityType.watching, name="giveaways"))
+        if not self._update_checked:  # on_ready can fire again after a reconnect
+            self._update_checked = True
+            task = asyncio.create_task(announce_update(self))
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
 
     async def on_tree_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         if isinstance(error, app_commands.CheckFailure):
