@@ -62,6 +62,21 @@ ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claim_deadline TIMESTAMPTZ;
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claim_message_id BIGINT;
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claimed_ids BIGINT[] NOT NULL DEFAULT '{}';
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS excluded_ids BIGINT[] NOT NULL DEFAULT '{}';
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS show_branding BOOLEAN NOT NULL DEFAULT TRUE;
+
+CREATE TABLE IF NOT EXISTS bot_guilds (
+    guild_id     BIGINT PRIMARY KEY,
+    name         TEXT,
+    member_count INT,
+    joined_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    left_at      TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS bot_votes (
+    user_id   BIGINT PRIMARY KEY,
+    last_vote TIMESTAMPTZ NOT NULL DEFAULT now(),
+    total     INT NOT NULL DEFAULT 0
+);
 
 CREATE TABLE IF NOT EXISTS bot_meta (
     key   TEXT PRIMARY KEY,
@@ -83,7 +98,7 @@ SETTING_TYPES = {
     "dm_winners": "boolean", "bypass_role_id": "bigint", "default_channel_id": "bigint",
     "default_duration": "text", "default_winners": "int", "show_entries": "boolean",
     "stack_bonuses": "boolean", "author_text": "text", "thumbnail_url": "text", "dm_message": "text",
-    "claim_minutes": "int",
+    "claim_minutes": "int", "show_branding": "boolean",
 }
 
 
@@ -249,3 +264,56 @@ class Database:
         return await self.pool.fetchrow(
             "UPDATE giveaways SET excluded_ids = excluded_ids || $2::bigint[] WHERE id=$1 RETURNING *",
             gid, list(user_ids))
+
+    # ---- growth tracking ----
+    async def guild_joined(self, guild_id, name, members):
+        await self.pool.execute(
+            """INSERT INTO bot_guilds (guild_id, name, member_count) VALUES ($1,$2,$3)
+               ON CONFLICT (guild_id) DO UPDATE SET name=$2, member_count=$3,
+                 joined_at = CASE WHEN bot_guilds.left_at IS NOT NULL THEN now() ELSE bot_guilds.joined_at END,
+                 left_at = NULL""", guild_id, name, members)
+
+    async def guild_left(self, guild_id):
+        await self.pool.execute("UPDATE bot_guilds SET left_at=now() WHERE guild_id=$1", guild_id)
+
+    async def sync_guilds(self, rows):
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                """INSERT INTO bot_guilds (guild_id, name, member_count) VALUES ($1,$2,$3)
+                   ON CONFLICT (guild_id) DO UPDATE SET name=$2, member_count=$3, left_at=NULL""", rows)
+            await conn.execute(
+                "UPDATE bot_guilds SET left_at=now() WHERE left_at IS NULL AND NOT (guild_id = ANY($1::bigint[]))",
+                [r[0] for r in rows])
+
+    async def guild_stats(self):
+        return await self.pool.fetchrow(
+            """SELECT count(*) FILTER (WHERE left_at IS NULL) AS servers,
+                      coalesce(sum(member_count) FILTER (WHERE left_at IS NULL), 0) AS members,
+                      count(*) FILTER (WHERE left_at IS NULL AND joined_at > now() - interval '1 day') AS joined_day,
+                      count(*) FILTER (WHERE left_at IS NULL AND joined_at > now() - interval '7 days') AS joined_week,
+                      count(*) FILTER (WHERE left_at > now() - interval '7 days') AS left_week
+               FROM bot_guilds""")
+
+    async def top_guilds(self, limit=5):
+        return await self.pool.fetch(
+            """SELECT name, member_count FROM bot_guilds WHERE left_at IS NULL
+               ORDER BY member_count DESC NULLS LAST LIMIT $1""", limit)
+
+    async def giveaway_totals(self):
+        return await self.pool.fetchrow(
+            """SELECT (SELECT count(*) FROM giveaways) AS giveaways,
+                      (SELECT count(*) FROM giveaways WHERE NOT ended AND NOT cancelled) AS active,
+                      (SELECT count(*) FROM entries) AS entries""")
+
+    async def record_vote(self, user_id):
+        return await self.pool.fetchval(
+            """INSERT INTO bot_votes (user_id, last_vote, total) VALUES ($1, now(), 1)
+               ON CONFLICT (user_id) DO UPDATE SET last_vote=now(), total = bot_votes.total + 1
+               RETURNING total""", user_id)
+
+    async def vote_row(self, user_id):
+        return await self.pool.fetchrow("SELECT total, last_vote FROM bot_votes WHERE user_id=$1", user_id)
+
+    async def vote_totals(self):
+        return await self.pool.fetchrow(
+            "SELECT count(*) AS voters, coalesce(sum(total), 0) AS votes FROM bot_votes")
