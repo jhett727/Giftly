@@ -58,6 +58,11 @@ ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS author_text TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS dm_message TEXT;
 
+CREATE TABLE IF NOT EXISTS bot_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS guild_bonus_roles (
     guild_id BIGINT NOT NULL,
     role_id  BIGINT NOT NULL,
@@ -201,3 +206,12 @@ class Database:
         result = await self.pool.execute(
             "DELETE FROM guild_bonus_roles WHERE guild_id=$1 AND role_id=$2", guild_id, role_id)
         return result.endswith(" 1")
+
+    # ---- bot metadata ----
+    async def meta_get(self, key):
+        return await self.pool.fetchval("SELECT value FROM bot_meta WHERE key=$1", key)
+
+    async def meta_set(self, key, value):
+        await self.pool.execute(
+            """INSERT INTO bot_meta (key, value) VALUES ($1, $2)
+               ON CONFLICT (key) DO UPDATE SET value=$2""", key, value)
