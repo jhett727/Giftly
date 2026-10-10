@@ -1,3 +1,4 @@
+import os
 import random
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -41,3 +42,18 @@ def prepare_dsn(url: str):
     else:
         ssl = None
     return urlunsplit(parts._replace(query=urlencode(query))), ssl
+
+
+DEV_GUILD_ID = int(os.environ.get("DEV_GUILD_ID", "1547787514163634278"))
+# View Channel + Send Messages + Embed Links + Read Message History
+INVITE_PERMISSIONS = 84992
+
+
+def build_invite_url(client_id):
+    return ("https://discord.com/oauth2/authorize"
+            f"?client_id={client_id}&permissions={INVITE_PERMISSIONS}&scope=bot%20applications.commands")
+
+
+def public_url():
+    """Public address of the website without a trailing slash, or an empty string."""
+    return (os.environ.get("SITE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").rstrip("/")
