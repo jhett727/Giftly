@@ -1,11 +1,13 @@
+import asyncio
 import logging
 import os
 import threading
 from pathlib import Path
 
+import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from flask import Flask, redirect, send_file
 
 from database import Database
@@ -83,6 +85,25 @@ class Giftly(commands.Bot):
         await self.load_extension("giveaways")
         self.tree.on_error = self.on_tree_error
         await self.tree.sync()
+        self.keep_awake.start()
+
+    @tasks.loop(minutes=10)
+    async def keep_awake(self):
+        """Ping our own public URL so Render's free tier doesn't spin the service down."""
+        url = os.environ.get("RENDER_EXTERNAL_URL")
+        if not url:
+            return
+        try:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"{url}/health") as resp:
+                    log.debug("keep-alive ping: %s", resp.status)
+        except Exception as exc:
+            log.warning("keep-alive ping failed: %s", exc)
+
+    @keep_awake.before_loop
+    async def _before_keep_awake(self):
+        await asyncio.sleep(45)  # give the web server a moment to start
 
     async def on_ready(self):
         log.info("Logged in as %s (%s servers)", self.user, len(self.guilds))
