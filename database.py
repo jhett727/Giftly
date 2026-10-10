@@ -57,6 +57,11 @@ ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS stack_bonuses BOOLEAN NOT NU
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS author_text TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS thumbnail_url TEXT;
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS dm_message TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS claim_minutes INT;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claim_deadline TIMESTAMPTZ;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claim_message_id BIGINT;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claimed_ids BIGINT[] NOT NULL DEFAULT '{}';
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS excluded_ids BIGINT[] NOT NULL DEFAULT '{}';
 
 CREATE TABLE IF NOT EXISTS bot_meta (
     key   TEXT PRIMARY KEY,
@@ -78,6 +83,7 @@ SETTING_TYPES = {
     "dm_winners": "boolean", "bypass_role_id": "bigint", "default_channel_id": "bigint",
     "default_duration": "text", "default_winners": "int", "show_entries": "boolean",
     "stack_bonuses": "boolean", "author_text": "text", "thumbnail_url": "text", "dm_message": "text",
+    "claim_minutes": "int",
 }
 
 
@@ -215,3 +221,31 @@ class Database:
         await self.pool.execute(
             """INSERT INTO bot_meta (key, value) VALUES ($1, $2)
                ON CONFLICT (key) DO UPDATE SET value=$2""", key, value)
+
+    # ---- claim windows ----
+    async def start_claim(self, gid, deadline, message_id):
+        await self.pool.execute(
+            "UPDATE giveaways SET claim_deadline=$2, claim_message_id=$3 WHERE id=$1",
+            gid, deadline, message_id)
+
+    async def clear_claim(self, gid):
+        return await self.pool.fetchrow(
+            "UPDATE giveaways SET claim_deadline=NULL WHERE id=$1 RETURNING *", gid)
+
+    async def get_by_claim_message(self, message_id):
+        return await self.pool.fetchrow(
+            "SELECT * FROM giveaways WHERE claim_message_id=$1", message_id)
+
+    async def active_claims(self):
+        return await self.pool.fetch(
+            "SELECT id, claim_deadline FROM giveaways WHERE claim_deadline IS NOT NULL")
+
+    async def add_claim(self, gid, user_id):
+        return await self.pool.fetchrow(
+            """UPDATE giveaways SET claimed_ids = array_append(claimed_ids, $2::bigint)
+               WHERE id=$1 AND NOT ($2::bigint = ANY(claimed_ids)) RETURNING *""", gid, user_id)
+
+    async def add_excluded(self, gid, user_ids):
+        return await self.pool.fetchrow(
+            "UPDATE giveaways SET excluded_ids = excluded_ids || $2::bigint[] WHERE id=$1 RETURNING *",
+            gid, list(user_ids))
