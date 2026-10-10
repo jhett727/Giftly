@@ -22,10 +22,17 @@ DEFAULT_WIN = "Congratulations {winners}! You won **{prize}**."
 DEFAULT_NONE = "Nobody entered **{prize}** with a valid entry, so there's no winner."
 WINNER_MENTIONS = discord.AllowedMentions(users=True, roles=False, everyone=False)
 
+DEFAULT_DM = "You won **{prize}** in **{server}**.\n[Jump to the giveaway]({link})"
+ADMIN_ONLY = {"settings", "bonus-add", "bonus-remove"}
+PAGES = {"roles": "Roles", "look": "Look and feel", "messages": "Messages", "defaults": "Defaults and rules"}
+
 DEFAULTS = {
     "color": DEFAULT_COLOR, "ping_role_id": None, "manager_role_id": None, "blacklist_role_id": None,
-    "button_label": "Enter", "button_emoji": "\U0001F389", "footer_text": None,
-    "win_message": DEFAULT_WIN, "no_winner_message": DEFAULT_NONE, "dm_winners": True,
+    "bypass_role_id": None, "button_label": "Enter", "button_emoji": "\U0001F389", "footer_text": None,
+    "author_text": "Giveaway", "thumbnail_url": None, "show_entries": True,
+    "win_message": DEFAULT_WIN, "no_winner_message": DEFAULT_NONE, "dm_message": DEFAULT_DM,
+    "dm_winners": True, "default_channel_id": None, "default_duration": None, "default_winners": 1,
+    "stack_bonuses": True,
 }
 CUSTOM_EMOJI = re.compile(r"^<a?:\w+:\d+>$")
 
@@ -105,25 +112,60 @@ class LeaveView(discord.ui.View):
 
 
 # ====================================================================== settings panel
+class PageSelect(discord.ui.Select):
+    def __init__(self, cog, page):
+        super().__init__(placeholder="Settings page", row=0, options=[
+            discord.SelectOption(label=label, value=key, default=key == page) for key, label in PAGES.items()])
+        self.cog = cog
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.cog.refresh_panel(interaction, self.values[0])
+
+
 class RolePicker(discord.ui.RoleSelect):
-    def __init__(self, cog, field, placeholder, current, row):
+    def __init__(self, cog, page, field, placeholder, current, row):
         defaults = ([discord.SelectDefaultValue(id=current, type=discord.SelectDefaultValueType.role)]
                     if current else [])
         super().__init__(placeholder=placeholder, min_values=0, max_values=1,
                          default_values=defaults, row=row)
-        self.cog, self.field = cog, field
+        self.cog, self.page, self.field = cog, page, field
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         value = self.values[0].id if self.values else None
         await self.cog.save_setting(interaction.guild_id, self.field, value)
-        await self.cog.refresh_panel(interaction)
+        await self.cog.refresh_panel(interaction, self.page)
 
 
-class AppearanceModal(discord.ui.Modal, title="Appearance"):
-    def __init__(self, cog, cfg):
+class ChannelPicker(discord.ui.ChannelSelect):
+    def __init__(self, cog, page, current, row):
+        defaults = ([discord.SelectDefaultValue(id=current, type=discord.SelectDefaultValueType.channel)]
+                    if current else [])
+        super().__init__(placeholder="Default channel for new giveaways", min_values=0, max_values=1,
+                         channel_types=[discord.ChannelType.text], default_values=defaults, row=row)
+        self.cog, self.page = cog, page
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        value = self.values[0].id if self.values else None
+        await self.cog.save_setting(interaction.guild_id, "default_channel_id", value)
+        await self.cog.refresh_panel(interaction, self.page)
+
+
+class ActionButton(discord.ui.Button):
+    def __init__(self, label, handler, style=discord.ButtonStyle.secondary, row=1):
+        super().__init__(label=label, style=style, row=row)
+        self.handler = handler
+
+    async def callback(self, interaction: discord.Interaction):
+        await self.handler(interaction)
+
+
+class AppearanceModal(discord.ui.Modal, title="Colors and button"):
+    def __init__(self, cog, cfg, page):
         super().__init__()
-        self.cog = cog
+        self.cog, self.page = cog, page
         self.color = discord.ui.TextInput(
             label="Embed color (hex)", placeholder="#7C3AED", required=False, max_length=7,
             default=f"#{cfg['color']:06X}")
@@ -146,6 +188,7 @@ class AppearanceModal(discord.ui.Modal, title="Appearance"):
             return await interaction.response.send_message(
                 "That color isn't a valid hex code. Try something like `#7C3AED`.", ephemeral=True)
         emoji = str(self.emoji).strip()
+        raw_emoji = emoji
         if emoji.lower() == "none":
             emoji = ""
         elif emoji and not valid_emoji(emoji):
@@ -156,65 +199,143 @@ class AppearanceModal(discord.ui.Modal, title="Appearance"):
         gid = interaction.guild_id
         await self.cog.save_setting(gid, "color", color)
         await self.cog.save_setting(gid, "button_label", str(self.btn_label).strip() or None)
-        await self.cog.save_setting(gid, "button_emoji", emoji if (emoji or str(self.emoji).strip()) else None)
+        await self.cog.save_setting(gid, "button_emoji", emoji if raw_emoji else None)
         await self.cog.save_setting(gid, "footer_text", str(self.footer).strip() or None)
-        await self.cog.refresh_panel(interaction)
+        await self.cog.refresh_panel(interaction, self.page)
+
+
+class EmbedModal(discord.ui.Modal, title="Label and image"):
+    def __init__(self, cog, cfg, page):
+        super().__init__()
+        self.cog, self.page = cog, page
+        self.author = discord.ui.TextInput(
+            label="Label above the title", placeholder="Giveaway", required=False, max_length=30,
+            default=cfg["author_text"])
+        self.thumb = discord.ui.TextInput(
+            label="Thumbnail image link (https)", placeholder="https://...", required=False, max_length=300,
+            default=cfg["thumbnail_url"])
+        self.add_item(self.author)
+        self.add_item(self.thumb)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        thumb = str(self.thumb).strip()
+        if thumb and not thumb.lower().startswith("https://"):
+            return await interaction.response.send_message(
+                "The thumbnail needs to be a link starting with `https://`.", ephemeral=True)
+        await interaction.response.defer()
+        author = str(self.author).strip()
+        gid = interaction.guild_id
+        await self.cog.save_setting(gid, "author_text", None if author in ("", "Giveaway") else author)
+        await self.cog.save_setting(gid, "thumbnail_url", thumb or None)
+        await self.cog.refresh_panel(interaction, self.page)
 
 
 class MessagesModal(discord.ui.Modal, title="Messages"):
-    def __init__(self, cog, cfg):
+    def __init__(self, cog, cfg, page):
         super().__init__()
-        self.cog = cog
+        self.cog, self.page = cog, page
         self.win = discord.ui.TextInput(
             label="Winner message", style=discord.TextStyle.paragraph, required=False, max_length=1000,
             placeholder="{winners} {prize} {host} {link} {server}", default=cfg["win_message"])
         self.none = discord.ui.TextInput(
             label="No-winner message", style=discord.TextStyle.paragraph, required=False, max_length=500,
             placeholder="{prize} {server}", default=cfg["no_winner_message"])
-        self.add_item(self.win)
-        self.add_item(self.none)
+        self.dm = discord.ui.TextInput(
+            label="Winner DM", style=discord.TextStyle.paragraph, required=False, max_length=1000,
+            placeholder="{prize} {server} {link} {host}", default=cfg["dm_message"])
+        for item in (self.win, self.none, self.dm):
+            self.add_item(item)
 
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer()
         gid = interaction.guild_id
-        win, none = str(self.win).strip(), str(self.none).strip()
-        await self.cog.save_setting(gid, "win_message", None if win in ("", DEFAULT_WIN) else win)
-        await self.cog.save_setting(gid, "no_winner_message", None if none in ("", DEFAULT_NONE) else none)
-        await self.cog.refresh_panel(interaction)
+        for field, box, default in (("win_message", self.win, DEFAULT_WIN),
+                                    ("no_winner_message", self.none, DEFAULT_NONE),
+                                    ("dm_message", self.dm, DEFAULT_DM)):
+            text = str(box).strip()
+            await self.cog.save_setting(gid, field, None if text in ("", default) else text)
+        await self.cog.refresh_panel(interaction, self.page)
+
+
+class DefaultsModal(discord.ui.Modal, title="Default time and winners"):
+    def __init__(self, cog, cfg, page):
+        super().__init__()
+        self.cog, self.page = cog, page
+        self.duration = discord.ui.TextInput(
+            label="Default duration", placeholder="e.g. 24h or 3d", required=False, max_length=20,
+            default=cfg["default_duration"])
+        self.winners = discord.ui.TextInput(
+            label="Default number of winners", placeholder="1", required=False, max_length=2,
+            default=str(cfg["default_winners"]))
+        self.add_item(self.duration)
+        self.add_item(self.winners)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        duration = str(self.duration).strip()
+        if duration:
+            seconds = parse_duration(duration)
+            if seconds is None or not MIN_SECONDS <= seconds <= MAX_SECONDS:
+                return await interaction.response.send_message(
+                    "Use a duration like `24h` or `3d` between 30 seconds and 90 days.", ephemeral=True)
+        raw = str(self.winners).strip()
+        winners = None
+        if raw:
+            if not raw.isdigit() or not 1 <= int(raw) <= 20:
+                return await interaction.response.send_message(
+                    "Winners needs to be a number from 1 to 20.", ephemeral=True)
+            winners = int(raw)
+        await interaction.response.defer()
+        await self.cog.save_setting(interaction.guild_id, "default_duration", duration or None)
+        await self.cog.save_setting(interaction.guild_id, "default_winners", winners)
+        await self.cog.refresh_panel(interaction, self.page)
 
 
 class SettingsView(discord.ui.View):
-    def __init__(self, cog, cfg):
+    def __init__(self, cog, cfg, page="roles"):
         super().__init__(timeout=300)
-        self.cog = cog
-        self.add_item(RolePicker(cog, "ping_role_id", "Ping role (pinged for new giveaways)", cfg["ping_role_id"], 0))
-        self.add_item(RolePicker(cog, "manager_role_id", "Manager role (can run giveaways)", cfg["manager_role_id"], 1))
-        self.add_item(RolePicker(cog, "blacklist_role_id", "Blocked role (can't enter)", cfg["blacklist_role_id"], 2))
-        on = cfg["dm_winners"]
-        self.dm_toggle.label = f"Winner DMs: {'On' if on else 'Off'}"
-        self.dm_toggle.style = discord.ButtonStyle.success if on else discord.ButtonStyle.secondary
+        self.cog, self.cfg, self.page = cog, cfg, page
+        self.add_item(PageSelect(cog, page))
+        primary, danger = discord.ButtonStyle.primary, discord.ButtonStyle.danger
+        if page == "roles":
+            roles = (("ping_role_id", "Ping role (pinged for new giveaways)"),
+                     ("manager_role_id", "Manager role (can run giveaways)"),
+                     ("blacklist_role_id", "Blocked role (can't enter or win)"),
+                     ("bypass_role_id", "Bypass role (skips entry requirements)"))
+            for row, (field, text) in enumerate(roles, start=1):
+                self.add_item(RolePicker(cog, page, field, text, cfg[field], row))
+        elif page == "look":
+            self.add_item(ActionButton("Colors and button", self.open(AppearanceModal), primary))
+            self.add_item(ActionButton("Label and image", self.open(EmbedModal), primary))
+            self.add_item(ActionButton(f"Entry count: {'shown' if cfg['show_entries'] else 'hidden'}",
+                                       self.toggler("show_entries")))
+        elif page == "messages":
+            self.add_item(ActionButton("Edit messages", self.open(MessagesModal), primary))
+            self.add_item(ActionButton(f"Winner DMs: {'on' if cfg['dm_winners'] else 'off'}",
+                                       self.toggler("dm_winners")))
+        else:
+            self.add_item(ChannelPicker(cog, page, cfg["default_channel_id"], 1))
+            self.add_item(ActionButton("Default time and winners", self.open(DefaultsModal), primary, row=2))
+            self.add_item(ActionButton(f"Stack bonuses: {'on' if cfg['stack_bonuses'] else 'off'}",
+                                       self.toggler("stack_bonuses"), row=2))
+            self.add_item(ActionButton("Reset everything", self.reset, danger, row=2))
 
-    @discord.ui.button(label="Appearance", style=discord.ButtonStyle.primary, row=3)
-    async def appearance(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AppearanceModal(self.cog, await self.cog.settings(interaction.guild_id)))
+    def open(self, modal_cls):
+        async def handler(interaction):
+            await interaction.response.send_modal(modal_cls(self.cog, self.cfg, self.page))
+        return handler
 
-    @discord.ui.button(label="Messages", style=discord.ButtonStyle.primary, row=3)
-    async def messages(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(MessagesModal(self.cog, await self.cog.settings(interaction.guild_id)))
+    def toggler(self, field):
+        async def handler(interaction):
+            await interaction.response.defer()
+            await self.cog.save_setting(interaction.guild_id, field, not self.cfg[field])
+            await self.cog.refresh_panel(interaction, self.page)
+        return handler
 
-    @discord.ui.button(label="Winner DMs", row=3)
-    async def dm_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        cfg = await self.cog.settings(interaction.guild_id)
-        await self.cog.save_setting(interaction.guild_id, "dm_winners", not cfg["dm_winners"])
-        await self.cog.refresh_panel(interaction)
-
-    @discord.ui.button(label="Reset", style=discord.ButtonStyle.danger, row=3)
-    async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def reset(self, interaction):
         await interaction.response.defer()
         await self.cog.db.reset_settings(interaction.guild_id)
         self.cog._cfg.pop(interaction.guild_id, None)
-        await self.cog.refresh_panel(interaction)
+        await self.cog.refresh_panel(interaction, self.page)
 
 
 # ====================================================================== the cog
@@ -245,9 +366,9 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         if interaction.user.guild_permissions.manage_guild:
             return True
         name = interaction.command.name if interaction.command else ""
-        if name != "settings" and await self.is_manager(interaction):
+        if name not in ADMIN_ONLY and await self.is_manager(interaction):
             return True
-        extra = "" if name == "settings" else " or the giveaway manager role"
+        extra = "" if name in ADMIN_ONLY else " or the giveaway manager role"
         raise app_commands.CheckFailure(f"You need the Manage Server permission{extra} to use that.")
 
     async def is_manager(self, interaction):
@@ -290,6 +411,7 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             for key in DEFAULTS:
                 if row[key] is not None:
                     cfg[key] = row[key]
+        cfg["bonus"] = await self.db.bonus_list(guild_id)
         self._cfg[guild_id] = (time.monotonic() + 60, cfg)
         return cfg
 
@@ -298,23 +420,44 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         self._cfg.pop(guild_id, None)
 
     def settings_embed(self, cfg):
-        embed = discord.Embed(title="Giveaway settings", color=cfg["color"],
-                              description="Use the menus and buttons below. Changes apply straight away.")
-        embed.add_field(name="Ping role", value=role_text(cfg["ping_role_id"]))
-        embed.add_field(name="Manager role", value=role_text(cfg["manager_role_id"]))
-        embed.add_field(name="Blocked role", value=role_text(cfg["blacklist_role_id"]))
-        embed.add_field(name="Color", value=f"#{cfg['color']:06X}")
+        embed = discord.Embed(
+            title="Giveaway settings", color=cfg["color"],
+            description="Pick a page from the menu, then change what you like. Changes apply straight away.")
         button = f"{cfg['button_emoji']} {cfg['button_label']}".strip() if cfg["button_emoji"] else cfg["button_label"]
-        embed.add_field(name="Entry button", value=button)
-        embed.add_field(name="Winner DMs", value="On" if cfg["dm_winners"] else "Off")
+        for name, value in (
+                ("Ping role", role_text(cfg["ping_role_id"])),
+                ("Manager role", role_text(cfg["manager_role_id"])),
+                ("Blocked role", role_text(cfg["blacklist_role_id"])),
+                ("Bypass role", role_text(cfg["bypass_role_id"])),
+                ("Color", f"#{cfg['color']:06X}"),
+                ("Entry button", button),
+                ("Label", cfg["author_text"]),
+                ("Thumbnail", "Set" if cfg["thumbnail_url"] else "None"),
+                ("Entry count", "Shown" if cfg["show_entries"] else "Hidden"),
+                ("Default channel", f"<#{cfg['default_channel_id']}>" if cfg["default_channel_id"] else "Where you run it"),
+                ("Default time", cfg["default_duration"] or "Not set"),
+                ("Default winners", str(cfg["default_winners"])),
+                ("Winner DMs", "On" if cfg["dm_winners"] else "Off"),
+                ("Stack bonuses", "On" if cfg["stack_bonuses"] else "Off")):
+            embed.add_field(name=name, value=value)
+        bonus = ", ".join(f"<@&{rid}> +{n}" for rid, n in cfg["bonus"].items())
+        embed.add_field(name="Bonus roles", value=bonus or "None. Add one with `/giveaway bonus-add`.", inline=False)
         embed.add_field(name="Footer", value=cfg["footer_text"] or "None", inline=False)
-        embed.add_field(name="Winner message", value=cfg["win_message"][:300], inline=False)
-        embed.add_field(name="No-winner message", value=cfg["no_winner_message"][:300], inline=False)
+        embed.add_field(name="Winner message", value=cfg["win_message"][:200], inline=False)
+        embed.add_field(name="No-winner message", value=cfg["no_winner_message"][:200], inline=False)
+        embed.add_field(name="Winner DM", value=cfg["dm_message"][:200], inline=False)
         return embed
 
-    async def refresh_panel(self, interaction):
+    async def refresh_panel(self, interaction, page="roles"):
         cfg = await self.settings(interaction.guild_id)
-        await interaction.edit_original_response(embed=self.settings_embed(cfg), view=SettingsView(self, cfg))
+        await interaction.edit_original_response(embed=self.settings_embed(cfg), view=SettingsView(self, cfg, page))
+
+    def entry_weight(self, member, g, cfg):
+        earned = [n for rid, n in cfg["bonus"].items() if member.get_role(rid) is not None]
+        extra = sum(earned) if cfg["stack_bonuses"] else max(earned, default=0)
+        if g["bonus_role_id"] and member.get_role(g["bonus_role_id"]) is not None:
+            extra += g["bonus_entries"]
+        return 1 + extra
 
     # ---------------------------------------------------------------- helpers
     async def get_channel(self, channel_id):
@@ -360,15 +503,16 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
 
         shade = {"active": cfg["color"], "ended": ENDED_COLOR, "cancelled": CANCELLED_COLOR}[state]
         embed = discord.Embed(title=g["prize"], description="\n\n".join(parts), color=shade)
-        embed.set_author(name={"active": "Giveaway", "ended": "Giveaway ended",
-                               "cancelled": "Giveaway cancelled"}[state])
+        label = cfg["author_text"]
+        embed.set_author(name={"active": label, "ended": f"{label} ended", "cancelled": f"{label} cancelled"}[state])
         embed.add_field(name="Hosted by", value=f"<@{g['host_id']}>")
         if state == "ended":
             winners = ", ".join(f"<@{u}>" for u in g["winner_ids"]) or "No valid entries"
             embed.add_field(name="Winners", value=winners[:1000])
         else:
             embed.add_field(name="Winners", value=str(g["winners"]))
-        embed.add_field(name="Entries", value=f"{count:,}")
+        if cfg["show_entries"]:
+            embed.add_field(name="Entries", value=f"{count:,}")
 
         if state == "active":
             lines = []
@@ -381,10 +525,14 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 lines.append(f"Your account must be at least {g['min_account_days']} days old.")
             if g["min_server_days"]:
                 lines.append(f"You must have been in this server for {g['min_server_days']} days.")
+            if cfg["bonus"]:
+                lines.append("Bonus entries: " + ", ".join(f"<@&{rid}> +{n}" for rid, n in cfg["bonus"].items()))
             if lines:
-                embed.add_field(name="Details", value="\n".join(lines), inline=False)
+                embed.add_field(name="Details", value="\n".join(lines)[:1000], inline=False)
         if g["image_url"]:
             embed.set_image(url=g["image_url"])
+        if cfg["thumbnail_url"]:
+            embed.set_thumbnail(url=cfg["thumbnail_url"])
         footer = f"Giveaway #{g['id']}"
         if cfg["footer_text"]:
             footer += f" · {cfg['footer_text']}"
@@ -450,19 +598,19 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
 
     async def dm_winner(self, uid, g, guild_name):
         try:
+            cfg = await self.settings(g["guild_id"])
+            text = fill(cfg["dm_message"], prize=g["prize"], server=guild_name,
+                        host=f"<@{g['host_id']}>", link=jump(g), winners=f"<@{uid}>")
             user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
-            embed = discord.Embed(
-                title="You won!",
-                description=f"You won **{g['prize']}** in **{guild_name}**.\n[Jump to the giveaway]({jump(g)})",
-                color=DEFAULT_COLOR)
-            await user.send(embed=embed)
+            await user.send(embed=discord.Embed(title="You won!", description=text, color=cfg["color"]))
         except discord.HTTPException:
             pass
 
     # ---------------------------------------------------------------- drawing
     async def pick_winners(self, guild, g, entries, k, exclude):
         """Draw in weighted random order, checking each candidate is still eligible."""
-        blocked = (await self.settings(guild.id))["blacklist_role_id"]
+        cfg = await self.settings(guild.id)
+        blocked, bypass = cfg["blacklist_role_id"], cfg["bypass_role_id"]
         order = weighted_order([(u, w) for u, w in entries if u not in exclude])
         winners, checked = [], 0
         for uid in order:
@@ -477,9 +625,10 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                     continue
             if member.bot:
                 continue
-            if g["required_role_id"] and member.get_role(g["required_role_id"]) is None:
-                continue
             if blocked and member.get_role(blocked) is not None:
+                continue
+            skips_rules = bool(bypass and member.get_role(bypass) is not None)
+            if g["required_role_id"] and not skips_rules and member.get_role(g["required_role_id"]) is None:
                 continue
             winners.append(uid)
         return winners
@@ -526,27 +675,26 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         cfg = await self.settings(g["guild_id"])
         if cfg["blacklist_role_id"] and member.get_role(cfg["blacklist_role_id"]) is not None:
             return await interaction.followup.send("You can't enter giveaways in this server.", ephemeral=True)
-        if g["required_role_id"] and member.get_role(g["required_role_id"]) is None:
-            return await interaction.followup.send(
-                f"You need the <@&{g['required_role_id']}> role to enter this one.", ephemeral=True)
-        if g["min_account_days"] and (utcnow() - member.created_at).days < g["min_account_days"]:
-            return await interaction.followup.send(
-                f"Your Discord account needs to be at least {g['min_account_days']} days old to enter.", ephemeral=True)
-        if g["min_server_days"]:
-            joined = member.joined_at
-            if joined is None or (utcnow() - joined).days < g["min_server_days"]:
+
+        if not (cfg["bypass_role_id"] and member.get_role(cfg["bypass_role_id"]) is not None):
+            if g["required_role_id"] and member.get_role(g["required_role_id"]) is None:
                 return await interaction.followup.send(
-                    f"You need to have been in this server for {g['min_server_days']} days to enter.", ephemeral=True)
+                    f"You need the <@&{g['required_role_id']}> role to enter this one.", ephemeral=True)
+            if g["min_account_days"] and (utcnow() - member.created_at).days < g["min_account_days"]:
+                return await interaction.followup.send(
+                    f"Your Discord account needs to be at least {g['min_account_days']} days old to enter.", ephemeral=True)
+            if g["min_server_days"]:
+                joined = member.joined_at
+                if joined is None or (utcnow() - joined).days < g["min_server_days"]:
+                    return await interaction.followup.send(
+                        f"You need to have been in this server for {g['min_server_days']} days to enter.", ephemeral=True)
 
-        weight = 1
-        if g["bonus_role_id"] and member.get_role(g["bonus_role_id"]) is not None:
-            weight += g["bonus_entries"]
-
+        weight = self.entry_weight(member, g, cfg)
         if await self.db.add_entry(g["id"], member.id, weight):
             self.schedule_refresh(g["id"])
             text = "You're in. Good luck!"
             if weight > 1:
-                text += f" Your role gives you {weight} entries."
+                text += f" Your roles give you {weight} entries."
             await interaction.followup.send(text, ephemeral=True)
         else:
             await interaction.followup.send(
@@ -589,8 +737,8 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         host="Show someone else as the host")
     async def gw_start(self, interaction: discord.Interaction,
                        prize: app_commands.Range[str, 1, 100],
-                       duration: str,
-                       winners: app_commands.Range[int, 1, 20] = 1,
+                       duration: Optional[str] = None,
+                       winners: Optional[app_commands.Range[int, 1, 20]] = None,
                        channel: Optional[discord.TextChannel] = None,
                        required_role: Optional[discord.Role] = None,
                        bonus_role: Optional[discord.Role] = None,
@@ -600,6 +748,12 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                        description: Optional[app_commands.Range[str, 1, 500]] = None,
                        image: Optional[app_commands.Range[str, 1, 400]] = None,
                        host: Optional[discord.Member] = None):
+        await interaction.response.defer(ephemeral=True)
+        cfg = await self.settings(interaction.guild_id)
+        duration = duration or cfg["default_duration"]
+        if not duration:
+            return await self.say(interaction, "Add a duration, or set a default one in `/giveaway settings`.")
+        winners = winners or cfg["default_winners"]
         seconds = parse_duration(duration)
         if seconds is None:
             return await self.say(interaction, "I couldn't read that duration. Try something like `30m`, `2h` or `1d12h`.")
@@ -610,6 +764,8 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         if image and not image.lower().startswith("https://"):
             return await self.say(interaction, "The image needs to be a link starting with `https://`.")
 
+        if channel is None and cfg["default_channel_id"]:
+            channel = interaction.guild.get_channel(cfg["default_channel_id"])
         channel = channel or interaction.channel
         if not isinstance(channel, discord.TextChannel):
             return await self.say(interaction, "Pick a regular text channel for this giveaway.")
@@ -620,7 +776,6 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         if lacking:
             return await self.say(interaction, f"I'm missing these permissions in {channel.mention}: {', '.join(lacking)}.")
 
-        await interaction.response.defer(ephemeral=True)
         g = await self.db.create(
             guild_id=interaction.guild_id, channel_id=channel.id,
             host_id=(host or interaction.user).id,
@@ -631,7 +786,6 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             bonus_entries=bonus_entries if bonus_role else 0,
             image_url=image, min_account_days=min_account_days or 0, min_server_days=min_server_days or 0)
 
-        cfg = await self.settings(interaction.guild_id)
         ping = role_text(cfg["ping_role_id"]) if cfg["ping_role_id"] else None
         try:
             msg = await channel.send(
@@ -782,7 +936,31 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
     async def gw_settings(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         cfg = await self.settings(interaction.guild_id)
-        await interaction.followup.send(embed=self.settings_embed(cfg), view=SettingsView(self, cfg), ephemeral=True)
+        await interaction.followup.send(embed=self.settings_embed(cfg), view=SettingsView(self, cfg, "roles"), ephemeral=True)
+
+    @app_commands.command(name="bonus-add", description="Give a role bonus entries in every giveaway")
+    @app_commands.describe(role="The role that earns bonus entries", entries="How many extra entries it adds")
+    async def gw_bonus_add(self, interaction: discord.Interaction, role: discord.Role,
+                           entries: app_commands.Range[int, 1, 50]):
+        await interaction.response.defer(ephemeral=True)
+        cfg = await self.settings(interaction.guild_id)
+        if role.id not in cfg["bonus"] and len(cfg["bonus"]) >= 10:
+            return await interaction.followup.send("You can have up to 10 bonus roles. Remove one first.", ephemeral=True)
+        await self.db.bonus_set(interaction.guild_id, role.id, entries)
+        self._cfg.pop(interaction.guild_id, None)
+        await interaction.followup.send(
+            f"{role.mention} now earns +{entries} {'entry' if entries == 1 else 'entries'} in every giveaway.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
+
+    @app_commands.command(name="bonus-remove", description="Remove a bonus entries role")
+    @app_commands.describe(role="The role to remove")
+    async def gw_bonus_remove(self, interaction: discord.Interaction, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        removed = await self.db.bonus_remove(interaction.guild_id, role.id)
+        self._cfg.pop(interaction.guild_id, None)
+        await interaction.followup.send(
+            f"{role.mention} no longer earns bonus entries." if removed else f"{role.mention} wasn't a bonus role.",
+            ephemeral=True, allowed_mentions=discord.AllowedMentions.none())
 
     # autocomplete: pick giveaways by name instead of typing IDs
     @gw_end.autocomplete("giveaway")
