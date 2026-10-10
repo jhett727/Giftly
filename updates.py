@@ -89,6 +89,28 @@ def build_embed(sha, messages, files):
     return embed
 
 
+async def _post(bot, embed):
+    """Post through a webhook if one is configured (it ignores channel permission quirks),
+    otherwise send as the bot."""
+    url = os.environ.get("UPDATES_WEBHOOK_URL")
+    if url:
+        async with aiohttp.ClientSession() as session:
+            await discord.Webhook.from_url(url, session=session).send(embed=embed, username="Giftly")
+        return
+    channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
+    await channel.send(embed=embed)
+
+
+def _permission_report(bot):
+    channel = bot.get_channel(CHANNEL_ID)
+    if channel is None:
+        return "Giftly can't see that channel at all. Is it in a server Giftly has joined?"
+    perms = channel.permissions_for(channel.guild.me)
+    return (f"Channel #{channel.name} in '{channel.guild.name}' ({type(channel).__name__}): "
+            f"view_channel={perms.view_channel}, send_messages={perms.send_messages}, "
+            f"embed_links={perms.embed_links}, send_messages_in_threads={perms.send_messages_in_threads}")
+
+
 async def announce_update(bot):
     sha = os.environ.get("RENDER_GIT_COMMIT")
     slug = os.environ.get("RENDER_GIT_REPO_SLUG")
@@ -102,9 +124,10 @@ async def announce_update(bot):
             return
         log.info("New version %s detected, posting update announcement", sha[:7])
         messages, files = await _collect(slug, last, sha, os.environ.get("GITHUB_TOKEN"))
-        channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
-        await channel.send(embed=build_embed(sha, messages, files))
+        await _post(bot, build_embed(sha, messages, files))
         await bot.db.meta_set("last_announced_commit", sha)
         log.info("Announced update %s", sha[:7])
+    except discord.Forbidden:
+        log.error("Discord refused the update post (403). %s", _permission_report(bot))
     except Exception:
         log.exception("Could not post the update announcement (does the bot have access to channel %s?)", CHANNEL_ID)
