@@ -93,11 +93,14 @@ async def announce_update(bot):
     sha = os.environ.get("RENDER_GIT_COMMIT")
     slug = os.environ.get("RENDER_GIT_REPO_SLUG")
     if not sha or not slug:
-        return  # not running from a Git deploy on Render
+        log.info("Update announcement skipped: RENDER_GIT_COMMIT / RENDER_GIT_REPO_SLUG not set (not a Git deploy on Render?)")
+        return
     try:
         last = await bot.db.meta_get("last_announced_commit")
         if last == sha:
+            log.info("Update %s was already announced, nothing to post", sha[:7])
             return
+        log.info("New version %s detected, posting update announcement", sha[:7])
         messages, files = await _collect(slug, last, sha, os.environ.get("GITHUB_TOKEN"))
         channel = bot.get_channel(CHANNEL_ID) or await bot.fetch_channel(CHANNEL_ID)
         await channel.send(embed=build_embed(sha, messages, files))
