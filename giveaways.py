@@ -1,14 +1,17 @@
 import asyncio
 import datetime as dt
 import logging
+import os
 import re
 import time
 from typing import Optional
 
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 
+from extras import DropView, ExtrasMixin, LaunchError, ordinal
 from utils import parse_duration, public_url, weighted_order
 
 log = logging.getLogger("giftly.giveaways")
@@ -24,6 +27,7 @@ WINNER_MENTIONS = discord.AllowedMentions(users=True, roles=False, everyone=Fals
 
 DEFAULT_DM = "You won **{prize}** in **{server}**.\n[Jump to the giveaway]({link})"
 ADMIN_ONLY = {"settings", "bonus-add", "bonus-remove"}
+PUBLIC_COMMANDS = {"mystats"}
 PAGES = {"roles": "Roles", "look": "Look and feel", "messages": "Messages", "defaults": "Defaults and rules"}
 
 DEFAULTS = {
@@ -33,6 +37,7 @@ DEFAULTS = {
     "win_message": DEFAULT_WIN, "no_winner_message": DEFAULT_NONE, "dm_message": DEFAULT_DM,
     "dm_winners": True, "default_channel_id": None, "default_duration": None, "default_winners": 1,
     "stack_bonuses": True, "claim_minutes": 0, "show_branding": True,
+    "public_listing": False, "public_invite": None, "reminders": True,
 }
 CUSTOM_EMOJI = re.compile(r"^<a?:\w+:\d+>$")
 
@@ -225,19 +230,28 @@ class EmbedModal(discord.ui.Modal, title="Label and image"):
         self.thumb = discord.ui.TextInput(
             label="Thumbnail image link (https)", placeholder="https://...", required=False, max_length=300,
             default=cfg["thumbnail_url"])
+        self.invite = discord.ui.TextInput(
+            label="Server invite (for the public giveaways page)", placeholder="https://discord.gg/yourcode",
+            required=False, max_length=100, default=cfg["public_invite"])
         self.add_item(self.author)
         self.add_item(self.thumb)
+        self.add_item(self.invite)
 
     async def on_submit(self, interaction: discord.Interaction):
         thumb = str(self.thumb).strip()
         if thumb and not thumb.lower().startswith("https://"):
             return await interaction.response.send_message(
                 "The thumbnail needs to be a link starting with `https://`.", ephemeral=True)
+        invite = str(self.invite).strip()
+        if invite and not invite.lower().startswith(("https://discord.gg/", "https://discord.com/invite/")):
+            return await interaction.response.send_message(
+                "Use a Discord invite link, like https://discord.gg/yourcode.", ephemeral=True)
         await interaction.response.defer()
         author = str(self.author).strip()
         gid = interaction.guild_id
         await self.cog.save_setting(gid, "author_text", None if author in ("", "Giveaway") else author)
         await self.cog.save_setting(gid, "thumbnail_url", thumb or None)
+        await self.cog.save_setting(gid, "public_invite", invite or None)
         await self.cog.refresh_panel(interaction, self.page)
 
 
@@ -330,6 +344,8 @@ class SettingsView(discord.ui.View):
                                        self.toggler("show_entries")))
             self.add_item(ActionButton(f"Powered-by line: {'shown' if cfg['show_branding'] else 'hidden'}",
                                        self.toggler("show_branding")))
+            self.add_item(ActionButton(f"Public listing: {'on' if cfg['public_listing'] else 'off'}",
+                                       self.toggler("public_listing")))
         elif page == "messages":
             self.add_item(ActionButton("Edit messages", self.open(MessagesModal), primary))
             self.add_item(ActionButton(f"Winner DMs: {'on' if cfg['dm_winners'] else 'off'}",
@@ -339,6 +355,8 @@ class SettingsView(discord.ui.View):
             self.add_item(ActionButton("Default time and winners", self.open(DefaultsModal), primary, row=2))
             self.add_item(ActionButton(f"Stack bonuses: {'on' if cfg['stack_bonuses'] else 'off'}",
                                        self.toggler("stack_bonuses"), row=2))
+            self.add_item(ActionButton(f"Reminders: {'on' if cfg['reminders'] else 'off'}",
+                                       self.toggler("reminders"), row=2))
             self.add_item(ActionButton("Reset everything", self.reset, danger, row=2))
 
     def open(self, modal_cls):
@@ -362,7 +380,7 @@ class SettingsView(discord.ui.View):
 
 # ====================================================================== the cog
 @app_commands.guild_only()
-class Giveaways(commands.GroupCog, group_name="giveaway",
+class Giveaways(ExtrasMixin, commands.GroupCog, group_name="giveaway",
                 group_description="Create and manage giveaways"):
     def __init__(self, bot):
         super().__init__()
@@ -374,24 +392,31 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         self._tasks = set()
         self._cfg = {}       # guild id -> (expiry, settings)
         self.claims = {}     # giveaway id -> claim deadline
+        self.remind = {}     # giveaway id -> when to send the one-hour reminder
+        self.extras_init()
 
     # ---------------------------------------------------------------- lifecycle
     async def cog_load(self):
         self.bot.add_view(EntryView(self))
         self.bot.add_view(ClaimView(self))
+        self.bot.add_view(DropView(self))
         for row in await self.db.active_schedule():
-            self.schedule[row["id"]] = row["ends_at"]
+            self.register_timers(row)
         for row in await self.db.active_claims():
             self.claims[row["id"]] = row["claim_deadline"]
         self.watcher.start()
+        await self.extras_load()
 
     async def cog_unload(self):
         self.watcher.cancel()
+        self.extras_unload()
 
     async def interaction_check(self, interaction: discord.Interaction):
         if interaction.user.guild_permissions.manage_guild:
             return True
         name = interaction.command.name if interaction.command else ""
+        if name in PUBLIC_COMMANDS:
+            return True
         if name not in ADMIN_ONLY and await self.is_manager(interaction):
             return True
         extra = "" if name in ADMIN_ONLY else " or the giveaway manager role"
@@ -417,10 +442,30 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         for gid, deadline in list(self.claims.items()):
             if deadline <= now and gid not in self._ending:
                 self.spawn(self._expire_safely(gid))
+        for gid, at in list(self.remind.items()):
+            if at <= now:
+                self.remind.pop(gid, None)
+                self.spawn(self._remind(gid))
 
     @watcher.before_loop
     async def _before_watcher(self):
         await self.bot.wait_until_ready()
+
+    def register_timers(self, g):
+        self.schedule[g["id"]] = g["ends_at"]
+        if not g["reminded"] and not g["is_drop"] and (g["ends_at"] - g["created_at"]).total_seconds() > 7200:
+            self.remind[g["id"]] = g["ends_at"] - dt.timedelta(hours=1)
+
+    async def _remind(self, gid):
+        try:
+            g = await self.db.get(gid)
+            if g is None or g["ended"] or g["cancelled"] or g["reminded"]:
+                return
+            await self.db.mark_reminded(gid)
+            if (await self.settings(g["guild_id"]))["reminders"]:
+                await self.announce(g, f"One hour left to enter **{g['prize']}**. Press the button on the giveaway above.")
+        except Exception:
+            log.exception("Could not send the reminder for giveaway %s", gid)
 
     async def _expire_safely(self, gid):
         try:
@@ -471,6 +516,8 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 ("Thumbnail", "Set" if cfg["thumbnail_url"] else "None"),
                 ("Entry count", "Shown" if cfg["show_entries"] else "Hidden"),
                 ("Powered-by line", "Shown" if cfg["show_branding"] else "Hidden"),
+                ("Public listing", "On" if cfg["public_listing"] else "Off"),
+                ("Reminders", "On" if cfg["reminders"] else "Off"),
                 ("Default channel", f"<#{cfg['default_channel_id']}>" if cfg["default_channel_id"] else "Where you run it"),
                 ("Default time", cfg["default_duration"] or "Not set"),
                 ("Default winners", str(cfg["default_winners"])),
@@ -532,7 +579,9 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         parts = []
         if g["description"]:
             parts.append(g["description"])
-        if state == "active":
+        if state == "active" and g["is_drop"]:
+            parts.append(f"First to press the button wins. It's gone {ts(ends, 'R')}.")
+        elif state == "active":
             parts.append(f"Ends {ts(ends, 'R')} ({ts(ends, 'f')})")
         elif state == "ended":
             parts.append(f"Ended {ts(ends, 'R')}")
@@ -549,10 +598,13 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         if state == "ended":
             winners = ", ".join(f"<@{u}>" for u in g["winner_ids"]) or "No valid entries"
             embed.add_field(name="Winners", value=winners[:1000])
-        else:
+        elif not g["is_drop"]:
             embed.add_field(name="Winners", value=str(g["winners"]))
-        if cfg["show_entries"]:
+        if cfg["show_entries"] and not g["is_drop"]:
             embed.add_field(name="Entries", value=f"{count:,}")
+        if len(g["prize_list"]) > 1:
+            embed.add_field(name="Prizes", inline=False,
+                            value="\n".join(f"{ordinal(i)}: {p}" for i, p in enumerate(g["prize_list"], 1))[:1000])
 
         if state == "active":
             lines = []
@@ -565,6 +617,10 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 lines.append(f"Your account must be at least {g['min_account_days']} days old.")
             if g["min_server_days"]:
                 lines.append(f"You must have been in this server for {g['min_server_days']} days.")
+            if g["require_vote"]:
+                lines.append("Vote for Giftly on top.gg in the last 12 hours to enter.")
+            if g["min_messages"]:
+                lines.append(f"Send at least {g['min_messages']} messages in this server while it runs.")
             if cfg["bonus"]:
                 lines.append("Bonus entries: " + ", ".join(f"<@&{rid}> +{n}" for rid, n in cfg["bonus"].items()))
             if lines:
@@ -640,15 +696,32 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             except discord.HTTPException:
                 return None
 
-    async def dm_winner(self, uid, g, guild_name):
+    async def dm_winner(self, uid, g, guild_name, prize=None, code=None):
         try:
             cfg = await self.settings(g["guild_id"])
-            text = fill(cfg["dm_message"], prize=g["prize"], server=guild_name,
+            text = fill(cfg["dm_message"], prize=prize or g["prize"], server=guild_name,
                         host=f"<@{g['host_id']}>", link=jump(g), winners=f"<@{uid}>")
+            if code:
+                text += f"\nYour code: `{code}`"
             user = self.bot.get_user(uid) or await self.bot.fetch_user(uid)
             await user.send(embed=discord.Embed(title="You won!", description=text, color=cfg["color"]))
+            return True
         except discord.HTTPException:
-            pass
+            return False
+
+    async def deliver_prizes(self, g, winners, cfg, guild, ranked=True):
+        """DM winners their prize, plus a code when the giveaway has a pool of codes."""
+        for i, uid in enumerate(winners):
+            prize = g["prize_list"][i] if ranked and i < len(g["prize_list"]) else None
+            code = await self.db.pop_code(g["id"]) if g["codes"] else None
+            if code:
+                await self.db.add_award(g["id"], uid, prize or g["prize"], code)
+            if code or prize or cfg["dm_winners"]:
+                sent = await self.dm_winner(uid, g, guild.name, prize=prize, code=code)
+                if code and sent:
+                    await self.db.mark_delivered(g["id"], uid)
+                elif code:
+                    await self.announce(g, f"I couldn't DM <@{uid}>. Open your DMs and ask the host for your code.")
 
     # ---------------------------------------------------------------- drawing
     async def pick_winners(self, guild, g, entries, k, exclude):
@@ -698,10 +771,17 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
             values = dict(prize=g["prize"], host=f"<@{g['host_id']}>", link=jump(g), server=server)
             if winners:
                 names = ", ".join(f"<@{u}>" for u in winners)
-                await self.open_claim(g, fill(cfg["win_message"], winners=names, **values), cfg)
-                if cfg["dm_winners"] and guild:
-                    for uid in winners:
-                        await self.dm_winner(uid, g, guild.name)
+                if len(g["prize_list"]) > 1:
+                    places = "\n".join(f"{ordinal(i)}: <@{u}> wins **{g['prize_list'][i - 1]}**"
+                                       for i, u in enumerate(winners[:len(g["prize_list"])], 1))
+                    text = f"Congratulations to the winners!\n{places}"
+                else:
+                    text = fill(cfg["win_message"], winners=names, **values)
+                await self.open_claim(g, text, cfg)
+                if guild:
+                    await self.deliver_prizes(g, winners, cfg, guild)
+            elif g["is_drop"]:
+                await self.announce(g, f"Nobody grabbed **{g['prize']}** in time.")
             else:
                 await self.announce(g, fill(cfg["no_winner_message"], winners="nobody", **values))
             return g
@@ -732,6 +812,10 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 if joined is None or (utcnow() - joined).days < g["min_server_days"]:
                     return await interaction.followup.send(
                         f"You need to have been in this server for {g['min_server_days']} days to enter.", ephemeral=True)
+
+        problem = await self.extra_requirements(g, member)
+        if problem:
+            return await interaction.followup.send(problem, ephemeral=True)
 
         weight = self.entry_weight(member, g, cfg)
         if await self.db.add_entry(g["id"], member.id, weight):
@@ -821,13 +905,98 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                 await self.open_claim(
                     g, f"{lost} didn't claim in time. New {'winner' if len(replacements) == 1 else 'winners'} "
                        f"for **{g['prize']}**: {names}. Congratulations!", cfg)
-                if cfg["dm_winners"]:
-                    for uid in replacements:
-                        await self.dm_winner(uid, g, guild.name)
+                await self.deliver_prizes(g, replacements, cfg, guild, ranked=False)
             else:
                 await self.announce(g, f"{lost} didn't claim **{g['prize']}** in time, and there's nobody left to draw from.")
         finally:
             self._ending.discard(gid)
+
+    # ---------------------------------------------------------------- launching and drops
+    async def launch(self, guild, channel, host_id, p):
+        """Create a giveaway from a parameter dict and post it. Returns (row, message)."""
+        cfg = await self.settings(guild.id)
+        if p.get("require_vote") and not (os.environ.get("TOPGG_TOKEN") or os.environ.get("TOPGG_WEBHOOK_SECRET")):
+            raise LaunchError("Vote requirements aren't available yet because top.gg isn't connected to Giftly.")
+        drop = bool(p.get("is_drop"))
+        g = await self.db.create(
+            guild_id=guild.id, channel_id=channel.id, host_id=host_id, prize=p["prize"],
+            description=p.get("description"), winners=p.get("winners", 1),
+            ends_at=utcnow() + dt.timedelta(seconds=p["seconds"]),
+            required_role_id=p.get("required_role_id"), bonus_role_id=p.get("bonus_role_id"),
+            bonus_entries=p.get("bonus_entries", 0) if p.get("bonus_role_id") else 0,
+            image_url=p.get("image_url"), min_account_days=p.get("min_account_days") or 0,
+            min_server_days=p.get("min_server_days") or 0, prize_list=p.get("prize_list") or [],
+            codes=p.get("codes") or [], require_vote=bool(p.get("require_vote")),
+            min_messages=p.get("min_messages") or 0, is_drop=drop)
+        ping = f"<@&{cfg['ping_role_id']}>" if cfg["ping_role_id"] else None
+        view = DropView(self) if drop else EntryView(self, cfg["button_label"], cfg["button_emoji"])
+        try:
+            msg = await channel.send(
+                content=ping, embed=self.build_embed(g, 0, cfg), view=view,
+                allowed_mentions=discord.AllowedMentions(roles=True) if ping else None)
+        except discord.HTTPException:
+            await self.db.delete(g["id"])
+            raise LaunchError("I couldn't post that. Check my permissions in the channel, and that any image link works.")
+        await self.db.set_message(g["id"], msg.id)
+        g = await self.db.get(g["id"])
+        self.register_timers(g)
+        if g["min_messages"]:
+            self.track(g["id"], guild.id)
+        return g, msg
+
+    async def handle_drop(self, interaction):
+        await interaction.response.defer(ephemeral=True)
+        g = await self.db.get_by_message(interaction.message.id)
+        if g is None or not g["is_drop"] or g["ended"] or g["cancelled"] or g["ends_at"] <= utcnow():
+            return await interaction.followup.send("This drop is over.", ephemeral=True)
+        member = interaction.user
+        cfg = await self.settings(g["guild_id"])
+        if cfg["blacklist_role_id"] and member.get_role(cfg["blacklist_role_id"]) is not None:
+            return await interaction.followup.send("You can't join giveaways in this server.", ephemeral=True)
+        skips = bool(cfg["bypass_role_id"] and member.get_role(cfg["bypass_role_id"]) is not None)
+        if g["required_role_id"] and not skips and member.get_role(g["required_role_id"]) is None:
+            return await interaction.followup.send(
+                f"You need the <@&{g['required_role_id']}> role to grab this one.", ephemeral=True)
+        won = await self.db.win_drop(g["id"], member.id)
+        if won is None:
+            return await interaction.followup.send("Too slow, someone else grabbed it first.", ephemeral=True)
+        self.schedule.pop(g["id"], None)
+        await self.render_final(won)
+        await self.announce(won, f"<@{member.id}> grabbed **{won['prize']}**!")
+        await self.deliver_prizes(won, [member.id], cfg, interaction.guild)
+        await interaction.followup.send("You got it!", ephemeral=True)
+
+    async def has_voted(self, user_id):
+        row = await self.db.vote_row(user_id)
+        if row and row["last_vote"] > utcnow() - dt.timedelta(hours=12):
+            return True
+        token = os.environ.get("TOPGG_TOKEN")
+        client_id = self.bot.application_id or (self.bot.user.id if self.bot.user else None)
+        if not token or not client_id:
+            return False
+        try:
+            timeout = aiohttp.ClientTimeout(total=8)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(f"https://top.gg/api/bots/{client_id}/check",
+                                       params={"userId": str(user_id)}, headers={"Authorization": token}) as resp:
+                    if resp.status == 200:
+                        return bool((await resp.json()).get("voted"))
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            pass
+        return False
+
+    async def extra_requirements(self, g, member):
+        """Returns a message explaining what's missing, or None when the member qualifies."""
+        if g["require_vote"] and not await self.has_voted(member.id):
+            growth = self.bot.get_cog("Growth")
+            link = growth.vote_url() if growth else None
+            return "You need to vote for Giftly on top.gg in the last 12 hours to enter this one." + (f"\n{link}" if link else "")
+        if g["min_messages"]:
+            have = await self.message_count(g["id"], member.id)
+            if have < g["min_messages"]:
+                return (f"You need to send {g['min_messages'] - have} more message(s) in this server "
+                        "since the giveaway started to enter.")
+        return None
 
     # ---------------------------------------------------------------- autocomplete
     async def _choices(self, interaction, current, mode):
@@ -862,7 +1031,9 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         min_server_days="Minimum days a member has been in this server",
         description="Extra text shown on the giveaway",
         image="Link to an image to show on the giveaway (https)",
-        host="Show someone else as the host")
+        host="Show someone else as the host",
+        require_vote="Entrants must have voted for Giftly on top.gg in the last 12 hours",
+        min_messages="Messages entrants must send while the giveaway runs")
     async def gw_start(self, interaction: discord.Interaction,
                        prize: app_commands.Range[str, 1, 100],
                        duration: Optional[str] = None,
@@ -875,7 +1046,9 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
                        min_server_days: Optional[app_commands.Range[int, 1, 3650]] = None,
                        description: Optional[app_commands.Range[str, 1, 500]] = None,
                        image: Optional[app_commands.Range[str, 1, 400]] = None,
-                       host: Optional[discord.Member] = None):
+                       host: Optional[discord.Member] = None,
+                       require_vote: bool = False,
+                       min_messages: Optional[app_commands.Range[int, 1, 10000]] = None):
         await interaction.response.defer(ephemeral=True)
         cfg = await self.settings(interaction.guild_id)
         duration = duration or cfg["default_duration"]
@@ -904,28 +1077,16 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         if lacking:
             return await self.say(interaction, f"I'm missing these permissions in {channel.mention}: {', '.join(lacking)}.")
 
-        g = await self.db.create(
-            guild_id=interaction.guild_id, channel_id=channel.id,
-            host_id=(host or interaction.user).id,
-            prize=prize, description=description, winners=winners,
-            ends_at=utcnow() + dt.timedelta(seconds=seconds),
+        params = dict(
+            prize=prize, seconds=seconds, winners=winners, description=description,
             required_role_id=required_role.id if required_role else None,
-            bonus_role_id=bonus_role.id if bonus_role else None,
-            bonus_entries=bonus_entries if bonus_role else 0,
-            image_url=image, min_account_days=min_account_days or 0, min_server_days=min_server_days or 0)
-
-        ping = role_text(cfg["ping_role_id"]) if cfg["ping_role_id"] else None
+            bonus_role_id=bonus_role.id if bonus_role else None, bonus_entries=bonus_entries,
+            image_url=image, min_account_days=min_account_days, min_server_days=min_server_days,
+            require_vote=require_vote, min_messages=min_messages)
         try:
-            msg = await channel.send(
-                content=ping, embed=self.build_embed(g, 0, cfg),
-                view=EntryView(self, cfg["button_label"], cfg["button_emoji"]),
-                allowed_mentions=discord.AllowedMentions(roles=True) if ping else None)
-        except discord.HTTPException:
-            await self.db.delete(g["id"])
-            return await self.say(interaction, "I couldn't post that. Check my permissions in the channel, and that the image link works.")
-
-        await self.db.set_message(g["id"], msg.id)
-        self.schedule[g["id"]] = g["ends_at"]
+            g, msg = await self.launch(interaction.guild, channel, (host or interaction.user).id, params)
+        except LaunchError as exc:
+            return await self.say(interaction, str(exc))
         await interaction.followup.send(
             f"Giveaway #{g['id']} is live in {channel.mention}. [Jump to it]({msg.jump_url})", ephemeral=True)
 
@@ -972,9 +1133,7 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
         await self.open_claim(
             g, f"New {'winner' if len(picked) == 1 else 'winners'} for **{g['prize']}**: {names}. Congratulations!",
             await self.settings(g["guild_id"]))
-        if (await self.settings(g["guild_id"]))["dm_winners"]:
-            for uid in picked:
-                await self.dm_winner(uid, g, guild.name)
+        await self.deliver_prizes(g, picked, await self.settings(g["guild_id"]), guild, ranked=False)
         await interaction.followup.send("Rerolled.", ephemeral=True)
 
     @app_commands.command(name="cancel", description="Cancel a running giveaway without picking winners")
@@ -1018,7 +1177,7 @@ class Giveaways(commands.GroupCog, group_name="giveaway",
 
         await interaction.response.defer(ephemeral=True)
         g = await self.db.update(giveaway, prize or g["prize"], winners or g["winners"], ends_at)
-        self.schedule[giveaway] = g["ends_at"]
+        self.register_timers(g)
         await self.refresh_message(giveaway)
         await interaction.followup.send(f"Giveaway #{giveaway} updated.", ephemeral=True)
 
