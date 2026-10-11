@@ -1,3 +1,5 @@
+import json
+
 import asyncpg
 
 from utils import prepare_dsn
@@ -63,6 +65,51 @@ ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claim_message_id BIGINT;
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS claimed_ids BIGINT[] NOT NULL DEFAULT '{}';
 ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS excluded_ids BIGINT[] NOT NULL DEFAULT '{}';
 ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS show_branding BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS public_listing BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS public_invite TEXT;
+ALTER TABLE guild_settings ADD COLUMN IF NOT EXISTS reminders BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS prize_list TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS codes TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS require_vote BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS min_messages INT NOT NULL DEFAULT 0;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS is_drop BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE giveaways ADD COLUMN IF NOT EXISTS reminded BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS giveaway_templates (
+    id       SERIAL PRIMARY KEY,
+    guild_id BIGINT NOT NULL,
+    name     TEXT NOT NULL,
+    data     JSONB NOT NULL,
+    UNIQUE (guild_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS recurring_giveaways (
+    id            SERIAL PRIMARY KEY,
+    guild_id      BIGINT NOT NULL,
+    channel_id    BIGINT NOT NULL,
+    name          TEXT NOT NULL,
+    data          JSONB NOT NULL,
+    every_seconds INT NOT NULL,
+    next_run      TIMESTAMPTZ NOT NULL,
+    created_by    BIGINT NOT NULL,
+    active        BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE IF NOT EXISTS giveaway_activity (
+    giveaway_id INT NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
+    user_id     BIGINT NOT NULL,
+    messages    INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (giveaway_id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS giveaway_awards (
+    giveaway_id INT NOT NULL REFERENCES giveaways(id) ON DELETE CASCADE,
+    user_id     BIGINT NOT NULL,
+    prize       TEXT,
+    code        TEXT,
+    delivered   BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (giveaway_id, user_id)
+);
 
 CREATE TABLE IF NOT EXISTS bot_guilds (
     guild_id     BIGINT PRIMARY KEY,
@@ -99,6 +146,7 @@ SETTING_TYPES = {
     "default_duration": "text", "default_winners": "int", "show_entries": "boolean",
     "stack_bonuses": "boolean", "author_text": "text", "thumbnail_url": "text", "dm_message": "text",
     "claim_minutes": "int", "show_branding": "boolean",
+    "public_listing": "boolean", "public_invite": "text", "reminders": "boolean",
 }
 
 
@@ -110,11 +158,15 @@ class Database:
     async def connect(self):
         dsn, ssl = prepare_dsn(self.url)
         options = dict(min_size=0, max_size=5, command_timeout=30,
-                       max_inactive_connection_lifetime=60)
+                       max_inactive_connection_lifetime=60, init=self._init_connection)
         if ssl:
             options["ssl"] = ssl
         self.pool = await asyncpg.create_pool(dsn, **options)
         await self.pool.execute(SCHEMA)
+
+    @staticmethod
+    async def _init_connection(conn):
+        await conn.set_type_codec("jsonb", encoder=json.dumps, decoder=json.loads, schema="pg_catalog")
 
     async def close(self):
         if self.pool:
@@ -125,11 +177,13 @@ class Database:
         return await self.pool.fetchrow(
             """INSERT INTO giveaways (guild_id, channel_id, host_id, prize, description,
                                       winners, ends_at, required_role_id, bonus_role_id, bonus_entries,
-                                      image_url, min_account_days, min_server_days)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *""",
+                                      image_url, min_account_days, min_server_days,
+                                      prize_list, codes, require_vote, min_messages, is_drop)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *""",
             f["guild_id"], f["channel_id"], f["host_id"], f["prize"], f["description"],
             f["winners"], f["ends_at"], f["required_role_id"], f["bonus_role_id"], f["bonus_entries"],
-            f["image_url"], f["min_account_days"], f["min_server_days"])
+            f["image_url"], f["min_account_days"], f["min_server_days"],
+            f["prize_list"], f["codes"], f["require_vote"], f["min_messages"], f["is_drop"])
 
     async def set_message(self, gid, message_id):
         await self.pool.execute("UPDATE giveaways SET message_id=$2 WHERE id=$1", gid, message_id)
@@ -145,7 +199,7 @@ class Database:
 
     async def active_schedule(self):
         return await self.pool.fetch(
-            "SELECT id, ends_at FROM giveaways WHERE NOT ended AND NOT cancelled")
+            "SELECT id, ends_at, created_at, reminded, is_drop FROM giveaways WHERE NOT ended AND NOT cancelled")
 
     async def active(self, guild_id):
         return await self.pool.fetch(
@@ -317,3 +371,123 @@ class Database:
     async def vote_totals(self):
         return await self.pool.fetchrow(
             "SELECT count(*) AS voters, coalesce(sum(total), 0) AS votes FROM bot_votes")
+
+    # ---- drops, prize codes, reminders ----
+    async def win_drop(self, gid, user_id):
+        return await self.pool.fetchrow(
+            """UPDATE giveaways SET ended=TRUE, winner_ids=ARRAY[$2::bigint], ends_at=LEAST(ends_at, now())
+               WHERE id=$1 AND is_drop AND NOT ended AND NOT cancelled RETURNING *""", gid, user_id)
+
+    async def pop_code(self, gid):
+        return await self.pool.fetchval(
+            """WITH old AS (SELECT codes[1] AS code FROM giveaways WHERE id=$1 FOR UPDATE)
+               UPDATE giveaways SET codes = codes[2:] FROM old WHERE giveaways.id=$1 RETURNING old.code""", gid)
+
+    async def add_award(self, gid, user_id, prize, code):
+        await self.pool.execute(
+            """INSERT INTO giveaway_awards (giveaway_id, user_id, prize, code) VALUES ($1,$2,$3,$4)
+               ON CONFLICT (giveaway_id, user_id) DO UPDATE SET prize=$3, code=$4, delivered=FALSE""",
+            gid, user_id, prize, code)
+
+    async def mark_delivered(self, gid, user_id):
+        await self.pool.execute(
+            "UPDATE giveaway_awards SET delivered=TRUE WHERE giveaway_id=$1 AND user_id=$2", gid, user_id)
+
+    async def awards(self, gid):
+        return await self.pool.fetch(
+            "SELECT user_id, prize, code, delivered FROM giveaway_awards WHERE giveaway_id=$1", gid)
+
+    async def mark_reminded(self, gid):
+        await self.pool.execute("UPDATE giveaways SET reminded=TRUE WHERE id=$1", gid)
+
+    # ---- message activity requirement ----
+    async def tracked_giveaways(self):
+        return await self.pool.fetch(
+            "SELECT id, guild_id FROM giveaways WHERE NOT ended AND NOT cancelled AND min_messages > 0")
+
+    async def bump_activity(self, rows):
+        async with self.pool.acquire() as conn:
+            await conn.executemany(
+                """INSERT INTO giveaway_activity (giveaway_id, user_id, messages) VALUES ($1,$2,$3)
+                   ON CONFLICT (giveaway_id, user_id)
+                   DO UPDATE SET messages = giveaway_activity.messages + $3""", rows)
+
+    async def activity_count(self, gid, user_id):
+        return await self.pool.fetchval(
+            "SELECT coalesce(max(messages), 0) FROM giveaway_activity WHERE giveaway_id=$1 AND user_id=$2",
+            gid, user_id)
+
+    # ---- stats ----
+    async def entry_rows(self, gid):
+        return await self.pool.fetch(
+            "SELECT user_id, weight, joined_at FROM entries WHERE giveaway_id=$1 ORDER BY joined_at", gid)
+
+    async def user_stats(self, guild_id, user_id):
+        entered = await self.pool.fetchval(
+            """SELECT count(*) FROM entries e JOIN giveaways g ON g.id = e.giveaway_id
+               WHERE g.guild_id=$1 AND e.user_id=$2""", guild_id, user_id)
+        won = await self.pool.fetchval(
+            "SELECT count(*) FROM giveaways WHERE guild_id=$1 AND $2::bigint = ANY(winner_ids)", guild_id, user_id)
+        recent = await self.pool.fetch(
+            """SELECT prize, ends_at FROM giveaways WHERE guild_id=$1 AND $2::bigint = ANY(winner_ids)
+               ORDER BY ends_at DESC LIMIT 3""", guild_id, user_id)
+        return entered, won, recent
+
+    # ---- templates ----
+    async def template_save(self, guild_id, name, data):
+        await self.pool.execute(
+            """INSERT INTO giveaway_templates (guild_id, name, data) VALUES ($1,$2,$3)
+               ON CONFLICT (guild_id, name) DO UPDATE SET data=$3""", guild_id, name, data)
+
+    async def template_get(self, guild_id, name):
+        return await self.pool.fetchrow(
+            "SELECT * FROM giveaway_templates WHERE guild_id=$1 AND lower(name)=lower($2)", guild_id, name)
+
+    async def template_list(self, guild_id):
+        return await self.pool.fetch(
+            "SELECT * FROM giveaway_templates WHERE guild_id=$1 ORDER BY name", guild_id)
+
+    async def template_delete(self, guild_id, name):
+        result = await self.pool.execute(
+            "DELETE FROM giveaway_templates WHERE guild_id=$1 AND lower(name)=lower($2)", guild_id, name)
+        return result.endswith(" 1")
+
+    # ---- recurring giveaways ----
+    async def repeat_create(self, guild_id, channel_id, name, data, every, next_run, created_by):
+        return await self.pool.fetchrow(
+            """INSERT INTO recurring_giveaways (guild_id, channel_id, name, data, every_seconds, next_run, created_by)
+               VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *""",
+            guild_id, channel_id, name, data, every, next_run, created_by)
+
+    async def repeat_count(self, guild_id):
+        return await self.pool.fetchval(
+            "SELECT count(*) FROM recurring_giveaways WHERE guild_id=$1 AND active", guild_id)
+
+    async def repeat_list(self, guild_id):
+        return await self.pool.fetch(
+            "SELECT * FROM recurring_giveaways WHERE guild_id=$1 AND active ORDER BY id", guild_id)
+
+    async def repeat_schedule(self):
+        return await self.pool.fetch("SELECT id, next_run FROM recurring_giveaways WHERE active")
+
+    async def repeat_get(self, rid):
+        return await self.pool.fetchrow("SELECT * FROM recurring_giveaways WHERE id=$1", rid)
+
+    async def repeat_advance(self, rid, next_run):
+        await self.pool.execute("UPDATE recurring_giveaways SET next_run=$2 WHERE id=$1", rid, next_run)
+
+    async def repeat_stop(self, rid, guild_id):
+        result = await self.pool.execute(
+            "UPDATE recurring_giveaways SET active=FALSE WHERE id=$1 AND guild_id=$2 AND active", rid, guild_id)
+        return result.endswith(" 1")
+
+    # ---- website ----
+    async def public_giveaways(self):
+        return await self.pool.fetch(
+            """SELECT g.id, g.prize, g.ends_at, g.winners, g.guild_id, gs.public_invite, bg.name AS guild_name,
+                      (SELECT count(*) FROM entries e WHERE e.giveaway_id = g.id) AS entry_count
+               FROM giveaways g
+               JOIN guild_settings gs ON gs.guild_id = g.guild_id AND gs.public_listing
+               LEFT JOIN bot_guilds bg ON bg.guild_id = g.guild_id
+               WHERE NOT g.ended AND NOT g.cancelled AND NOT g.is_drop
+               ORDER BY g.ends_at LIMIT 60""")
