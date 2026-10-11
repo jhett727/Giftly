@@ -15,6 +15,7 @@ from discord.ext import commands, tasks
 from flask import Flask, redirect, request, send_file
 
 from database import Database
+import webapp
 from updates import announce_update
 from utils import DEV_GUILD_ID, build_invite_url
 
@@ -185,6 +186,7 @@ class Giftly(commands.Bot):
 
 
 bot = Giftly()
+webapp.register(web, bot)
 
 
 @bot.tree.command(name="ping", description="Check that Giftly is online")
