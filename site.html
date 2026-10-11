@@ -18,6 +18,9 @@ a{color:inherit}
 .wrap{max-width:1000px;margin:0 auto;padding:0 24px}
 .top{background:linear-gradient(120deg,#7c3aed 0%,#a23fd0 48%,#ec4899 100%);color:#fff;border-radius:0 0 44px 44px;overflow:hidden}
 nav{display:flex;align-items:center;gap:12px;padding:22px 0;font:600 24px var(--head)}
+nav .links{margin-left:auto;display:flex;gap:20px;font:700 16px var(--body)}
+nav .links a{color:#fff;text-decoration:none}
+.more{margin-top:44px}
 nav img{width:40px;height:40px;border-radius:11px}
 .hero{display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:20px;padding:24px 0 64px}
 h1{font:600 clamp(36px,5.6vw,58px)/1.08 var(--head);margin:0 0 18px}
@@ -49,7 +52,7 @@ footer{padding:24px 0 44px;font-size:14px;opacity:.7}
 </head>
 <body>
 <div class="top"><div class="wrap">
-  <nav><img src="/logo.png" alt="">Giftly</nav>
+  <nav><img src="/logo.png" alt="">Giftly<span class="links"><a href="/commands">Commands</a><a href="/giveaways">Giveaways</a><a href="/terms">Terms</a></span></nav>
   <div class="hero">
     <div>
       <h1>Run giveaways in your Discord server.</h1>
@@ -92,6 +95,11 @@ footer{padding:24px 0 44px;font-size:14px;opacity:.7}
     </div>
   </div>
 
+  <div class="more">
+    <h2>And the rest</h2>
+    <p>Ask entrants to vote or stay active in chat, split a prize pool into 1st, 2nd and 3rd, and hand out prize codes automatically. Run a quick drop where the first click wins, or save a setup and repeat it every week. Hosts get stats, a downloadable entrant list, and a one-hour reminder that goes out by itself.</p>
+  </div>
+
   <div class="cmds">
     <h2>Make it yours</h2>
     <p>Open <b>/giveaway settings</b> in your server to change the color, the button, the winner message, which role gets pinged, and who is allowed to run giveaways.</p>
@@ -103,6 +111,7 @@ footer{padding:24px 0 44px;font-size:14px;opacity:.7}
       <dt>/giveaway cancel</dt><dd>Stop one without a draw.</dd>
       <dt>/giveaway list</dt><dd>See what's running.</dd>
     </dl>
+    <p style="margin:16px 0 0"><a href="/commands">See every command</a></p>
   </div>
 
   <div class="end">
