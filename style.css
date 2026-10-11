@@ -1,0 +1,28 @@
+:root{--violet:#7c3aed;--pink:#ec4899;--butter:#fde047;--amber:#f59e0b;--lav:#e9d5ff;--paper:#faf6ff;--ink:#2a1654;
+--head:"Fredoka","Trebuchet MS",system-ui,sans-serif;--body:"Nunito",system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 18px/1.65 var(--body)}
+a{color:var(--violet)}
+.bar{background:linear-gradient(120deg,#7c3aed,#a23fd0 55%,#ec4899);color:#fff;border-radius:0 0 28px 28px}
+.in{max-width:1000px;margin:0 auto;padding:16px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+.brand{display:flex;align-items:center;gap:10px;color:#fff;text-decoration:none;font:600 24px var(--head)}
+.brand img{width:36px;height:36px;border-radius:10px}
+.bar nav{margin-left:auto;display:flex;align-items:center;gap:20px;font-weight:700}
+.bar nav a{color:#fff;text-decoration:none}
+.bar nav a.btn{color:var(--ink)}
+.page{max-width:1000px;margin:0 auto;padding:40px 24px 60px}
+h1{font:600 clamp(32px,5vw,44px)/1.1 var(--head);margin:0 0 8px}
+h2{font:600 24px var(--head);margin:36px 0 12px}
+.lede{max-width:36em;opacity:.8;margin:0 0 28px}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:18px}
+.card{background:#fff;border-radius:20px;padding:20px 22px;box-shadow:0 6px 20px rgba(42,22,84,.08)}
+.card h3{font:600 21px var(--head);margin:0 0 6px;overflow-wrap:anywhere}
+.meta{margin:0 0 6px;opacity:.75;font-size:15px}
+.btn{display:inline-block;background:var(--butter);color:var(--ink);font:800 16px var(--body);padding:12px 22px;border-radius:14px;text-decoration:none;box-shadow:0 4px 0 var(--amber)}
+.btn.small{padding:7px 16px;font-size:15px;box-shadow:0 3px 0 var(--amber)}
+.btn:hover{transform:translateY(2px)}
+.cmd{display:grid;grid-template-columns:max-content 1fr;gap:6px 24px;background:#fff;border-radius:20px;padding:22px 26px}
+.cmd code{font:700 15px ui-monospace,Menlo,monospace;color:var(--violet)}
+.empty{background:var(--lav);border-radius:20px;padding:24px 26px;max-width:640px}
+footer{max-width:1000px;margin:0 auto;padding:0 24px 40px;font-size:14px;opacity:.7}
+@media(max-width:700px){.cmd{grid-template-columns:1fr;gap:0}.cmd span{margin-bottom:10px}.bar nav{margin-left:0;width:100%;gap:16px}}
